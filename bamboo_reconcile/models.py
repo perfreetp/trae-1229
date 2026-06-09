@@ -168,6 +168,7 @@ class Waybill:
     remark: str = ""
     exceptions: List[str] = field(default_factory=list)
     manual_notes: List[Dict[str, str]] = field(default_factory=list)
+    import_batch_id: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -242,4 +243,33 @@ class Settlement:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settlement":
+        return cls(**data)
+
+
+@dataclass
+class ImportBatch:
+    """导入批次记录"""
+    id: str = field(default_factory=_generate_id)
+    batch_no: str = ""
+    import_type: str = ""
+    source_file: str = ""
+    total_count: int = 0
+    success_count: int = 0
+    error_count: int = 0
+    warning_count: int = 0
+    duplicate_count: int = 0
+    exception_count: int = 0
+    operator: str = ""
+    import_time: str = field(default_factory=lambda: datetime.now().isoformat())
+    waybill_ids: List[str] = field(default_factory=list)
+    weight_note_ids: List[str] = field(default_factory=list)
+    error_details: List[Dict[str, Any]] = field(default_factory=list)
+    remark: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ImportBatch":
         return cls(**data)

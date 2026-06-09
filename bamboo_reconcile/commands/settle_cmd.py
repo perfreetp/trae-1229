@@ -215,11 +215,16 @@ def settle_driver(
 
     if export_path or True:
         if not export_path:
-            export_path = f"司机结算单_{start_date}_{end_date}.xlsx"
+            target_suffix = ""
+            if driver_name and len(settlements) == 1:
+                target_suffix = f"_{driver_name}"
+            elif plate and len(settlements) == 1:
+                target_suffix = f"_{plate.replace('/', '-')}"
+            export_path = f"司机结算包_{start_date}_{end_date}{target_suffix}.xlsx"
         if not os.path.isabs(export_path):
             export_path = os.path.join(store.get_settlement_dir(), export_path)
 
-        with click.progressbar(length=2, label="导出结算单") as bar:
+        with click.progressbar(length=2 + len(settlements), label="导出结算包") as bar:
             import pandas as pd
             os.makedirs(os.path.dirname(export_path), exist_ok=True)
             with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
@@ -238,10 +243,43 @@ def settle_driver(
 
                 if all_details:
                     df_detail = pd.DataFrame(all_details)
-                    df_detail.to_excel(writer, sheet_name="运单明细", index=False)
+                    df_detail.to_excel(writer, sheet_name="全部运单明细", index=False)
                 bar.update(1)
 
-        click.echo(f"\n✅ 司机结算单已导出: {export_path}")
+                for s in settlements:
+                    driver_sheet_rows = []
+                    for w in s["waybills"]:
+                        driver_sheet_rows.append({
+                            "结算单号": s["no"],
+                            "运单号": w.waybill_no,
+                            "运输日期": w.transport_date,
+                            "竹种": w.bamboo_type_name,
+                            "装车点": w.loading_point_name,
+                            "收购点": w.purchase_point_name,
+                            "里程(km)": w.mileage,
+                            "净重(吨)": round(w.net_weight, 3),
+                            "运费(元)": round(w.freight, 2),
+                            "竹款(元)": round(w.bamboo_value, 2),
+                            "合计(元)": round(w.freight + w.bamboo_value, 2),
+                            "状态": "已付款" if w.is_paid else "未付款",
+                            "已付金额": round(w.paid_amount, 2),
+                            "付款日期": w.paid_date,
+                            "付款备注": w.paid_remark,
+                            "竹农": w.farmer_name or "-",
+                            "磅单号": w.weight_note_no or "-",
+                            "备注": w.remark or "",
+                        })
+                    df_per = pd.DataFrame(driver_sheet_rows)
+                    sheet_name = f"{s['driver'][:10]}_{s['plate']}"
+                    invalid = '<>:"/\\|?*'
+                    for ch in invalid:
+                        sheet_name = sheet_name.replace(ch, "_")
+                    sheet_name = sheet_name[:31]
+                    df_per.to_excel(writer, sheet_name=sheet_name, index=False)
+                    bar.update(1)
+
+        click.echo(f"\n✅ 司机结算包已导出: {export_path}")
+        click.echo(f"   包含: 结算汇总 + 全部明细 + {len(settlements)} 个司机分Sheet")
 
     return settlements
 
@@ -393,30 +431,70 @@ def settle_farmer(
 
     if export_path or True:
         if not export_path:
-            export_path = f"竹农付款清单_{start_date}_{end_date}.xlsx"
+            target_suffix = ""
+            if farmer_name and len(payment_list) == 1:
+                target_suffix = f"_{farmer_name}"
+            export_path = f"竹农付款清单_{start_date}_{end_date}{target_suffix}.xlsx"
         if not os.path.isabs(export_path):
             export_path = os.path.join(store.get_settlement_dir(), export_path)
 
         import pandas as pd
         os.makedirs(os.path.dirname(export_path), exist_ok=True)
-        with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
-            df_pay = pd.DataFrame([
-                [p[1], p[2], p[3], p[4], p[5], p[6], p[7].replace("吨", ""),
-                 float(p[8].replace("¥", "").replace(",", "")),
-                 float(p[9].replace("¥", "").replace(",", "")),
-                 float(p[10].replace("¥", "").replace(",", ""))]
-                for p in payment_list
-            ], columns=[
-                "竹农", "联系电话", "开户行", "银行账号", "运单数",
-                "竹种明细", "总净重(吨)", "总竹款(元)", "已付(元)", "未付(元)"
-            ])
-            df_pay.to_excel(writer, sheet_name="付款清单", index=False)
+        total_sheets = 2 + len(farmer_groups)
+        with click.progressbar(length=total_sheets, label="导出付款清单") as bar:
+            with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+                df_pay = pd.DataFrame([
+                    [p[1], p[2], p[3], p[4], p[5], p[6], p[7].replace("吨", ""),
+                     float(p[8].replace("¥", "").replace(",", "")),
+                     float(p[9].replace("¥", "").replace(",", "")),
+                     float(p[10].replace("¥", "").replace(",", ""))]
+                    for p in payment_list
+                ], columns=[
+                    "竹农", "联系电话", "开户行", "银行账号", "运单数",
+                    "竹种明细", "总净重(吨)", "总竹款(元)", "已付(元)", "未付(元)"
+                ])
+                df_pay.to_excel(writer, sheet_name="付款清单汇总", index=False)
+                bar.update(1)
 
-            if all_details:
-                df_detail = pd.DataFrame(all_details)
-                df_detail.to_excel(writer, sheet_name="运单明细", index=False)
+                if all_details:
+                    df_detail = pd.DataFrame(all_details)
+                    df_detail.to_excel(writer, sheet_name="全部运单明细", index=False)
+                bar.update(1)
+
+                for f_name, wbs in farmer_groups.items():
+                    farmer_sheet_rows = []
+                    for w in wbs:
+                        farmer_sheet_rows.append({
+                            "竹农": f_name,
+                            "运单号": w.waybill_no,
+                            "运输日期": w.transport_date,
+                            "司机": w.driver_name or "-",
+                            "车牌": w.license_plate or "-",
+                            "竹种": w.bamboo_type_name or "-",
+                            "装车点": w.loading_point_name or "-",
+                            "收购点": w.purchase_point_name or "-",
+                            "净重(吨)": round(w.net_weight, 3),
+                            "单价(元/吨)": round(w.unit_price, 2),
+                            "竹款(元)": round(w.farmer_amount, 2),
+                            "运费(元)": round(w.freight, 2),
+                            "合计(元)": round(w.freight + w.farmer_amount, 2),
+                            "已付金额": round(min(w.paid_amount, w.farmer_amount), 2) if w.is_paid else 0,
+                            "付款日期": w.paid_date or "-",
+                            "状态": "已付款" if (w.is_paid and w.paid_amount >= w.farmer_amount) else "未付款",
+                            "磅单号": w.weight_note_no or "-",
+                            "备注": w.paid_remark or w.remark or "",
+                        })
+                    df_per = pd.DataFrame(farmer_sheet_rows)
+                    sheet_name = f"{f_name[:10]}"
+                    invalid = '<>:"/\\|?*'
+                    for ch in invalid:
+                        sheet_name = sheet_name.replace(ch, "_")
+                    sheet_name = sheet_name[:31] or "未命名竹农"
+                    df_per.to_excel(writer, sheet_name=sheet_name, index=False)
+                    bar.update(1)
 
         click.echo(f"\n✅ 竹农付款清单已导出: {export_path}")
+        click.echo(f"   包含: 付款汇总 + 全部明细 + {len(farmer_groups)} 个竹农分Sheet")
 
     return payment_list
 

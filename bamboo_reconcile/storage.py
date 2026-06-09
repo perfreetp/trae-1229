@@ -7,7 +7,7 @@ import copy
 
 from .models import (
     Waybill, WeightNote, PricingRule, Driver, Vehicle,
-    BambooType, LoadingPoint, PurchasePoint, Settlement
+    BambooType, LoadingPoint, PurchasePoint, Settlement, ImportBatch
 )
 
 T = TypeVar("T")
@@ -31,6 +31,7 @@ class DataStore:
             "loading_points": os.path.join(self.data_dir, "loading_points.json"),
             "purchase_points": os.path.join(self.data_dir, "purchase_points.json"),
             "settlements": os.path.join(self.data_dir, "settlements.json"),
+            "import_batches": os.path.join(self.data_dir, "import_batches.json"),
             "settings": os.path.join(self.data_dir, "settings.json"),
         }
         self._init_files()
@@ -298,6 +299,32 @@ class DataStore:
         settlements.append(settlement)
         self.save_settlements(settlements)
         return settlement
+
+    # ===== Import Batches =====
+    def load_import_batches(self) -> List[ImportBatch]:
+        return self._load_all("import_batches", ImportBatch)
+
+    def save_import_batches(self, batches: List[ImportBatch]):
+        self._save_all("import_batches", batches)
+
+    def add_import_batch(self, batch: ImportBatch) -> ImportBatch:
+        batches = self.load_import_batches()
+        batches.append(batch)
+        self.save_import_batches(batches)
+        return batch
+
+    def find_import_batch(self, batch_id: str) -> Optional[ImportBatch]:
+        for b in self.load_import_batches():
+            if b.id == batch_id or b.batch_no == batch_id:
+                return b
+        return None
+
+    def get_waybills_by_batch(self, batch_id: str) -> List[Waybill]:
+        batch = self.find_import_batch(batch_id)
+        if not batch:
+            return []
+        ids = set(batch.waybill_ids)
+        return [w for w in self.load_waybills() if w.id in ids or w.import_batch_id == batch.id or w.import_batch_id == batch.batch_no]
 
     # ===== Settings =====
     def get_settings(self) -> Dict[str, Any]:

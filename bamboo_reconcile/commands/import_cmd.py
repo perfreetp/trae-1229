@@ -5,11 +5,11 @@ from typing import List, Optional, Dict, Any
 import click
 import pandas as pd
 
-from ..models import Waybill, WeightNote, Driver, BambooType, LoadingPoint, PurchasePoint, Vehicle
+from ..models import Waybill, WeightNote, Driver, BambooType, LoadingPoint, PurchasePoint, Vehicle, ImportBatch
 from ..storage import DataStore
 from ..utils import (
     read_excel_file, safe_float, safe_str, normalize_date, normalize_license_plate,
-    print_table, validate_license_plate, validate_date
+    print_table, validate_license_plate, validate_date, generate_serial_no
 )
 
 
@@ -358,15 +358,40 @@ def _import_waybills(store: DataStore, df: pd.DataFrame, filepath: str, dry_run:
         click.echo("\n⚠️  试运行模式，未保存任何数据")
         return
 
+    seq = len(store.load_import_batches()) + 1
+    batch_no = generate_serial_no("IMP", seq)
+    batch = ImportBatch(
+        batch_no=batch_no,
+        import_type="运单",
+        source_file=filepath,
+        total_count=len(waybills),
+        success_count=len(waybills) - len(errors),
+        error_count=len(errors),
+        warning_count=warning_count,
+        duplicate_count=sum(1 for w in waybills if w.is_duplicate),
+        exception_count=sum(1 for w in waybills if w.exceptions),
+        operator="导入系统",
+        error_details=errors[:200],
+        remark=f"从 {os.path.basename(filepath)} 导入运单"
+    )
+
+    for w in waybills:
+        w.import_batch_id = batch.id
+        batch.waybill_ids.append(w.id)
+
     count = store.add_waybills_batch(waybills)
-    click.echo(f"\n✅ 成功导入运单: {count} 条")
+    store.add_import_batch(batch)
+
+    click.echo(f"\n✅ 成功导入运单: {count} 条 (批次号: {batch_no})")
 
     summary = []
     total_net = sum(w.net_weight for w in waybills)
     total_gross = sum(w.gross_weight for w in waybills)
+    summary.append(["批次号", batch_no])
     summary.append(["总条数", f"{len(waybills)} 条"])
     summary.append(["总毛重", f"{total_gross:.3f} 吨"])
     summary.append(["总净重", f"{total_net:.3f} 吨"])
+    summary.append(["异常单数", f"{batch.exception_count} 条"])
     print_table(summary, ["统计项", "数值"], "导入汇总")
 
 
@@ -417,9 +442,27 @@ def _import_weight_notes(store: DataStore, df: pd.DataFrame, filepath: str, dry_
         click.echo("\n⚠️  试运行模式，未保存任何数据")
         return
 
-    count = store.add_weight_notes_batch(notes)
-    click.echo(f"\n✅ 成功导入磅单照片清单: {count} 条")
+    seq = len(store.load_import_batches()) + 1
+    batch_no = generate_serial_no("IMP", seq)
+    batch = ImportBatch(
+        batch_no=batch_no,
+        import_type="磅单照片",
+        source_file=filepath,
+        total_count=len(notes),
+        success_count=len(notes) - len(errors),
+        error_count=len(errors),
+        warning_count=0,
+        duplicate_count=0,
+        exception_count=len(errors),
+        operator="导入系统",
+        error_details=errors[:200],
+        remark=f"从 {os.path.basename(filepath)} 导入磅单照片清单"
+    )
 
+    for n in notes:
+        batch.weight_note_ids.append(n.id)
+
+    count = store.add_weight_notes_batch(notes)
     matched = 0
     waybills = store.load_waybills()
     wn_map = {}
@@ -442,7 +485,13 @@ def _import_weight_notes(store: DataStore, df: pd.DataFrame, filepath: str, dry_
         store.save_weight_notes(notes)
         store.save_waybills(waybills)
 
+    batch.remark += f"，匹配运单{matched}条"
+    store.add_import_batch(batch)
+
+    click.echo(f"\n✅ 成功导入磅单照片清单: {count} 条 (批次号: {batch_no})")
+
     summary = []
+    summary.append(["批次号", batch_no])
     summary.append(["总条数", f"{len(notes)} 条"])
     summary.append(["匹配运单", f"{matched} 条"])
     summary.append(["未匹配", f"{len(notes) - matched} 条"])

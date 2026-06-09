@@ -1,11 +1,11 @@
-"""search 命令 - 按日期查询异常、按条件搜索运单、记录人工备注"""
+"""search 命令 - 按日期查询异常、按条件搜索运单、记录人工备注、查看导入批次"""
 from typing import List, Dict, Any
 from datetime import datetime
 from collections import defaultdict
 
 import click
 
-from ..models import Waybill
+from ..models import Waybill, ImportBatch
 from ..storage import DataStore
 from ..utils import (
     print_table, format_money, format_weight, is_within_date_range,
@@ -23,6 +23,7 @@ def search():
       exception - 按日期查询异常
       note      - 管理人工备注
       pending   - 搜索待处理事项
+      batch     - 查看导入批次记录
     """
     pass
 
@@ -37,16 +38,19 @@ def search():
 @click.option("--bamboo", default=None, help="竹种")
 @click.option("--loading", default=None, help="装车点")
 @click.option("--purchase", default=None, help="收购点")
-@click.option("--status", type=click.Choice(["all", "paid", "unpaid", "exception", "duplicate"]),
-              default="all", help="状态筛选")
+@click.option("--status",
+              type=click.Choice(["all", "paid", "unpaid", "exception", "duplicate",
+                                 "merge_result", "merge_original", "split_child", "split_original"]),
+              default="all", help="状态筛选：合并结果/已被合并/拆分子单/已被拆分")
+@click.option("--batch", "batch_id", default=None, help="按导入批次号或批次ID筛选")
 @click.option("--min-weight", type=float, default=None, help="最小净重(吨)")
 @click.option("--max-weight", type=float, default=None, help="最大净重(吨)")
 @click.option("--limit", type=int, default=50, help="显示结果数量，默认50")
-@click.option("--detail", is_flag=True, help="显示运单详情")
+@click.option("--detail", is_flag=True, help="显示运单详情（含关联运单追溯）")
 @click.pass_context
 def search_waybill(
     ctx, keyword, start_date, end_date, plate, driver, farmer,
-    bamboo, loading, purchase, status, min_weight, max_weight, limit, detail
+    bamboo, loading, purchase, status, batch_id, min_weight, max_weight, limit, detail
 ):
     """搜索运单
 
@@ -55,6 +59,9 @@ def search_waybill(
       bamboo search waybill --keyword 川A12345
       bamboo search waybill --start-date 2024-01-01 --end-date 2024-01-15 --status exception
       bamboo search waybill --driver 张三 --bamboo 毛竹
+      bamboo search waybill --status merge_result  (查找合并结果单
+      bamboo search waybill --status split_original  (查找被拆分的原单)
+      bamboo search waybill --batch IMP2024010001 --detail
       bamboo search waybill --keyword 张三 --detail
     """
     store: DataStore = ctx.obj["store"]
@@ -89,6 +96,14 @@ def search_waybill(
     if purchase:
         waybills = [w for w in waybills if purchase in (w.purchase_point_name or "")]
 
+    if batch_id:
+        batch = store.find_import_batch(batch_id)
+        if batch:
+            ids = set(batch.waybill_ids) | set([batch.id, batch.batch_no])
+            waybills = [w for w in waybills if w.id in ids or w.import_batch_id in ids]
+        else:
+            waybills = [w for w in waybills if w.import_batch_id == batch_id]
+
     if status == "paid":
         waybills = [w for w in waybills if w.is_paid]
     elif status == "unpaid":
@@ -97,6 +112,14 @@ def search_waybill(
         waybills = [w for w in waybills if w.exceptions]
     elif status == "duplicate":
         waybills = [w for w in waybills if w.is_duplicate]
+    elif status == "merge_result":
+        waybills = [w for w in waybills if w.is_merged and w.merged_ids]
+    elif status == "merge_original":
+        waybills = [w for w in waybills if w.is_merged and not w.merged_ids]
+    elif status == "split_child":
+        waybills = [w for w in waybills if w.is_split and w.split_parent_id]
+    elif status == "split_original":
+        waybills = [w for w in waybills if w.is_split and not w.split_parent_id]
 
     if min_weight is not None:
         waybills = [w for w in waybills if w.net_weight >= min_weight]
@@ -147,6 +170,12 @@ def search_waybill(
                 for idx, note in enumerate(w.manual_notes, 1):
                     click.echo(f"    {idx}. [{note.get('time', '')[:16]}] "
                                f"{note.get('operator', '')}: {note.get('content', '')}")
+
+            rel_info = _build_relation_info(store, w)
+            if rel_info:
+                click.echo("")
+                print_table(rel_info, ["关系类型", "运单号", "净重", "金额"],
+                            title=f"关联运单追溯 - {w.waybill_no}")
     else:
         data = []
         for i, w in enumerate(waybills[:limit]):
@@ -180,6 +209,55 @@ def search_waybill(
 
     if len(waybills) > limit:
         click.echo(f"  ... 还有 {len(waybills) - limit} 条未显示，使用 --limit {len(waybills)} 查看全部")
+
+
+def _build_relation_info(store: DataStore, w: Waybill) -> List[List[str]]:
+    """构建运单关联关系信息（合并/拆分追溯）"""
+    all_wbs = store.load_waybills()
+    id_map = {x.id: x for x in all_wbs}
+    result = []
+
+    if w.is_merged and w.merged_ids:
+        for mid in w.merged_ids:
+            src = id_map.get(mid)
+            if src:
+                result.append([
+                    "合并自(原单)",
+                    src.waybill_no,
+                    format_weight(src.net_weight),
+                    format_money(src.freight + src.bamboo_value)
+                ])
+    elif w.is_merged and not w.merged_ids:
+        for x in all_wbs:
+            if x.is_merged and w.id in x.merged_ids:
+                result.append([
+                    "被合并到(新单)",
+                    x.waybill_no,
+                    format_weight(x.net_weight),
+                    format_money(x.freight + x.bamboo_value)
+                ])
+                break
+
+    if w.is_split and w.split_parent_id:
+        parent = id_map.get(w.split_parent_id)
+        if parent:
+            result.append([
+                "拆分自(原单)",
+                parent.waybill_no,
+                format_weight(parent.net_weight),
+                format_money(parent.freight + parent.bamboo_value)
+            ])
+    elif w.is_split and not w.split_parent_id:
+        for x in all_wbs:
+            if x.split_parent_id == w.id:
+                result.append([
+                    "拆分为(子单)",
+                    x.waybill_no,
+                    format_weight(x.net_weight),
+                    format_money(x.freight + x.bamboo_value)
+                ])
+
+    return result
 
 
 @search.command("exception")
@@ -506,3 +584,144 @@ def search_pending(ctx, pending_type: str, start_date: str, end_date: str):
     click.echo(f"\n分类统计:")
     for k, v in sorted(counter.items(), key=lambda x: -x[1]):
         click.echo(f"  {k}: {v} 条")
+
+
+@search.command("batch")
+@click.option("--list", "list_batch", is_flag=True, help="列出导入批次记录")
+@click.option("--detail", "show_detail", is_flag=True, help="查看批次详情（需配合 --id）")
+@click.option("--waybills", "show_waybills", is_flag=True, help="查看某批次导入的运单（需配合 --id）")
+@click.option("--id", "batch_id", default=None, help="批次号或批次ID")
+@click.option("--limit", type=int, default=20, help="显示最近多少条，默认20")
+@click.option("--type", "batch_type", type=click.Choice(["all", "运单", "磅单照片"]),
+              default="all", help="按导入类型筛选")
+@click.pass_context
+def search_batch(ctx, list_batch: bool, show_detail: bool, show_waybills: bool,
+                 batch_id: str, limit: int, batch_type: str):
+    """查看导入批次记录
+
+    \b
+    示例:
+      bamboo search batch --list
+      bamboo search batch --list --type 运单 --limit 50
+      bamboo search batch --detail --id IMP2024010001
+      bamboo search batch --waybills --id IMP2024010001
+    """
+    store: DataStore = ctx.obj["store"]
+
+    if batch_id and not list_batch and not show_detail and not show_waybills:
+        show_detail = True
+
+    if show_detail and batch_id:
+        batch = store.find_import_batch(batch_id)
+        if not batch:
+            click.echo(f"\n❌ 未找到批次: {batch_id}")
+            return
+        info = [
+            ["批次号", batch.batch_no],
+            ["批次ID", batch.id],
+            ["导入类型", batch.import_type],
+            ["源文件", batch.source_file],
+            ["操作人", batch.operator or "-"],
+            ["导入时间", batch.import_time[:19].replace("T", " ")],
+            ["总行数", f"{batch.total_count} 行"],
+            ["成功", f"{batch.success_count} 行"],
+            ["失败", f"{batch.error_count} 行"],
+            ["警告", f"{batch.warning_count} 条"],
+            ["异常运单", f"{batch.exception_count} 条"],
+            ["重复运单", f"{batch.duplicate_count} 条"],
+            ["备注", batch.remark or "-"],
+        ]
+        print_table(info, ["项目", "内容"], f"批次详情 - {batch.batch_no}")
+
+        if batch.error_details:
+            click.echo(f"\n错误明细 (共 {len(batch.error_details)} 条):")
+            err_data = [[i + 1,
+                         e.get("行号", "-"),
+                         e.get("运单号", e.get("磅单号", "-")),
+                         e.get("车牌", "-"),
+                         e.get("错误", "-")]
+                        for i, e in enumerate(batch.error_details[:30])]
+            print_table(err_data, ["序", "行号", "单号", "车牌", "错误描述"],
+                        f"错误清单 (前{min(30, len(batch.error_details))}条)")
+            if len(batch.error_details) > 30:
+                click.echo(f"  ... 还有 {len(batch.error_details) - 30} 条")
+        return
+
+    if show_waybills and batch_id:
+        batch = store.find_import_batch(batch_id)
+        if not batch:
+            click.echo(f"\n❌ 未找到批次: {batch_id}")
+            return
+        wbs = store.get_waybills_by_batch(batch_id)
+        if not wbs:
+            click.echo(f"\n批次 {batch.batch_no} 没有导入运单记录")
+            return
+
+        eff = filter_effective_waybills(wbs)
+        exc = [w for w in wbs if w.exceptions]
+        dup = [w for w in wbs if w.is_duplicate]
+
+        summary = [
+            ["批次号", batch.batch_no],
+            ["导入运单数", f"{len(wbs)} 条"],
+            ["有效运单", f"{len(eff)} 条"],
+            ["有异常", f"{len(exc)} 条"],
+            ["重复运单", f"{len(dup)} 条"],
+            ["总净重", format_weight(sum(w.net_weight for w in wbs))],
+            ["总金额", format_money(sum(w.freight + w.bamboo_value for w in wbs))],
+        ]
+        print_table(summary, ["项目", "数值"], f"批次运单汇总 - {batch.batch_no}")
+
+        data = []
+        for i, w in enumerate(wbs[:50]):
+            status_str = []
+            label = get_waybill_status_label(w)
+            if label:
+                status_str.append(label)
+            if w.is_duplicate:
+                status_str.append("重复")
+            if w.exceptions:
+                status_str.append(f"异常{len(w.exceptions)}")
+            data.append([
+                i + 1, w.waybill_no, w.transport_date, w.license_plate,
+                w.driver_name, format_weight(w.net_weight),
+                format_money(w.freight + w.bamboo_value),
+                ", ".join(status_str) if status_str else "正常"
+            ])
+        print_table(data, ["序", "运单号", "日期", "车牌", "司机", "净重", "金额", "状态"],
+                    f"运单清单 (前{min(50, len(wbs))}条)")
+        if len(wbs) > 50:
+            click.echo(f"  ... 还有 {len(wbs) - 50} 条未显示")
+        return
+
+    batches = store.load_import_batches()
+    if batch_type != "all":
+        batches = [b for b in batches if b.import_type == batch_type]
+
+    if not batches:
+        click.echo("\n暂无导入批次记录")
+        return
+
+    batches = sorted(batches, key=lambda b: b.import_time, reverse=True)[:limit]
+    data = []
+    for idx, b in enumerate(batches, 1):
+        src = b.source_file
+        if len(src) > 30:
+            src = "..." + src[-27:]
+        data.append([
+            idx,
+            b.batch_no,
+            b.import_time[:10],
+            b.import_type,
+            src,
+            b.total_count,
+            b.success_count,
+            b.error_count,
+            b.exception_count,
+            b.operator or "-"
+        ])
+    print_table(
+        data,
+        ["序", "批次号", "日期", "类型", "源文件", "总行", "成功", "失败", "异常", "操作人"],
+        f"导入批次记录 (共{len(batches)}条, 最近{limit}条)"
+    )
