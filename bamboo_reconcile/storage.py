@@ -185,13 +185,22 @@ class DataStore:
         removed = original_len - len(remaining)
         if removed > 0:
             self.save_weight_notes(remaining)
-            matched_waybill_ids = [n.matched_waybill_id for n in removed_notes if n.matched and n.matched_waybill_id]
-            if matched_waybill_ids:
+            matched_map: Dict[str, tuple] = {}
+            for n in removed_notes:
+                if n.matched and n.matched_waybill_id:
+                    matched_map[n.matched_waybill_id] = (n.weight_note_no, n.photo_path)
+            if matched_map:
                 waybills = self.load_waybills()
+                restored_count = 0
                 for w in waybills:
-                    if w.id in matched_waybill_ids:
-                        w.weight_note_photo = ""
-                self.save_waybills(waybills)
+                    if w.id in matched_map:
+                        exp_no, exp_photo = matched_map[w.id]
+                        if (w.weight_note_no == exp_no or not w.weight_note_no) and w.weight_note_photo == exp_photo:
+                            w.weight_note_no = None
+                            w.weight_note_photo = ""
+                            restored_count += 1
+                if restored_count > 0:
+                    self.save_waybills(waybills)
         return removed
 
     # ===== Pricing Rules =====

@@ -14,6 +14,74 @@ from ..utils import (
 )
 
 
+def paid_freight(w: Waybill) -> float:
+    """单张运单已付运费（不混竹农款，按payment_target拆分）"""
+    if not w.is_paid:
+        return 0.0
+    target = (w.payment_target or "").strip().lower()
+    if target == "bamboo":
+        return 0.0
+    if target == "freight":
+        return round(min(w.paid_amount, w.freight), 2)
+    return round(min(w.paid_amount, w.freight), 2)
+
+
+def unpaid_freight(w: Waybill) -> float:
+    """单张运单未付运费"""
+    return round(max(0, w.freight - paid_freight(w)), 2)
+
+
+def is_freight_paid(w: Waybill) -> bool:
+    """运费是否已结清"""
+    return w.freight > 0 and w.is_paid and paid_freight(w) + 1e-6 >= w.freight
+
+
+def freight_status_text(w: Waybill) -> str:
+    """运费口径的状态文本"""
+    if w.freight <= 0:
+        return "无运费"
+    pf = paid_freight(w)
+    if pf >= w.freight - 1e-6:
+        return "已付清运费"
+    if pf > 0:
+        return f"部分付运费(已付{pf:.2f})"
+    return "未付运费"
+
+
+def paid_bamboo(w: Waybill) -> float:
+    """单张运单已付竹款（不混运费，按payment_target拆分）"""
+    if not w.is_paid:
+        return 0.0
+    target = (w.payment_target or "").strip().lower()
+    if target == "freight":
+        return 0.0
+    if target == "bamboo":
+        return round(min(w.paid_amount, w.farmer_amount), 2)
+    return round(max(0, w.paid_amount - w.freight), 2)
+
+
+def unpaid_bamboo(w: Waybill) -> float:
+    """单张运单未付竹款"""
+    return round(max(0, w.farmer_amount - paid_bamboo(w)), 2)
+
+
+def is_bamboo_paid(w: Waybill) -> bool:
+    """竹款是否已结清"""
+    return w.farmer_amount > 0 and w.is_paid and paid_bamboo(w) + 1e-6 >= w.farmer_amount
+
+
+def bamboo_status_text(w: Waybill) -> str:
+    """竹款口径的状态文本"""
+    if w.farmer_amount <= 0:
+        return "无竹款"
+    pb = paid_bamboo(w)
+    if pb >= w.farmer_amount - 1e-6:
+        return "已付清竹款"
+    if pb > 0:
+        return f"部分付竹款(已付{pb:.2f})"
+    return "未付竹款"
+
+
 @click.group()
 def settle():
     """结算管理 - 标记付款、生成司机结算单和竹农付款清单
@@ -64,9 +132,9 @@ def settle_driver(
     if plate:
         waybills = [w for w in waybills if plate in (w.license_plate or "")]
     if status == "unpaid":
-        waybills = [w for w in waybills if not w.is_paid]
+        waybills = [w for w in waybills if not is_freight_paid(w)]
     elif status == "paid":
-        waybills = [w for w in waybills if w.is_paid]
+        waybills = [w for w in waybills if is_freight_paid(w)]
 
     if not waybills:
         click.echo("\n没有符合条件的运单")
@@ -151,8 +219,9 @@ def settle_driver(
                 "里程(km)": w.mileage,
                 "净重(吨)": round(w.net_weight, 3),
                 "运费(元)": round(w.freight, 2),
-                "状态": "已付款" if w.is_paid else "未付款",
-                "已付金额": round(w.paid_amount, 2),
+                "状态(运费口径)": freight_status_text(w),
+                "已付运费(元)": paid_freight(w),
+                "未付运费(元)": unpaid_freight(w),
                 "付款日期": w.paid_date,
                 "付款备注": w.paid_remark,
             })
@@ -261,8 +330,9 @@ def settle_driver(
                             "运费(元)": round(w.freight, 2),
                             "竹款(元)": round(w.bamboo_value, 2),
                             "合计(元)": round(w.freight + w.bamboo_value, 2),
-                            "状态": "已付款" if w.is_paid else "未付款",
-                            "已付金额": round(w.paid_amount, 2),
+                            "状态(运费口径)": freight_status_text(w),
+                            "已付运费(元)": paid_freight(w),
+                            "未付运费(元)": unpaid_freight(w),
                             "付款日期": w.paid_date,
                             "付款备注": w.paid_remark,
                             "竹农": w.farmer_name or "-",
@@ -318,9 +388,9 @@ def settle_farmer(
     if bamboo:
         waybills = [w for w in waybills if bamboo in (w.bamboo_type_name or "")]
     if status == "unpaid":
-        waybills = [w for w in waybills if w.farmer_amount > 0 and not (w.is_paid and w.paid_amount >= w.farmer_amount)]
+        waybills = [w for w in waybills if w.farmer_amount > 0 and not is_bamboo_paid(w)]
     elif status == "paid":
-        waybills = [w for w in waybills if w.is_paid and w.paid_amount >= w.farmer_amount]
+        waybills = [w for w in waybills if is_bamboo_paid(w)]
 
     if not waybills:
         click.echo("\n没有符合条件的运单")
@@ -353,7 +423,7 @@ def settle_farmer(
 
         total_weight = sum(w.net_weight for w in wbs)
         total_value = sum(w.farmer_amount for w in wbs if w.farmer_amount > 0)
-        paid_amount = sum(min(w.paid_amount, w.farmer_amount) for w in wbs if w.is_paid)
+        paid_amount = sum(paid_bamboo(w) for w in wbs)
         unpaid_amount = total_value - paid_amount
 
         bamboo_detail = defaultdict(float)
@@ -389,7 +459,9 @@ def settle_farmer(
                 "净重(吨)": round(w.net_weight, 3),
                 "单价(元/吨)": round(w.unit_price, 2),
                 "竹款(元)": round(w.farmer_amount, 2),
-                "已付金额": round(min(w.paid_amount, w.farmer_amount), 2),
+                "状态(竹款口径)": bamboo_status_text(w),
+                "已付竹款(元)": paid_bamboo(w),
+                "未付竹款(元)": unpaid_bamboo(w),
                 "付款日期": w.paid_date,
                 "备注": w.paid_remark,
             })
@@ -402,7 +474,7 @@ def settle_farmer(
 
     grand_total_weight = sum(sum(w.net_weight for w in wbs) for wbs in farmer_groups.values())
     grand_total_value = sum(sum(w.farmer_amount for w in wbs if w.farmer_amount > 0) for wbs in farmer_groups.values())
-    grand_paid = sum(sum(min(w.paid_amount, w.farmer_amount) for w in wbs if w.is_paid) for wbs in farmer_groups.values())
+    grand_paid = sum(sum(paid_bamboo(w) for w in wbs) for wbs in farmer_groups.values())
     grand_unpaid = grand_total_value - grand_paid
 
     grand = [
@@ -419,9 +491,10 @@ def settle_farmer(
         updated_count = 0
         for wbs in farmer_groups.values():
             for w in wbs:
-                if not w.is_paid or w.paid_amount < w.farmer_amount:
+                if w.farmer_amount > 0 and not is_bamboo_paid(w):
+                    need_add_bamboo = max(0, w.farmer_amount - paid_bamboo(w))
                     w.is_paid = True
-                    w.paid_amount = w.freight + w.farmer_amount if w.freight > 0 else w.farmer_amount
+                    w.paid_amount = round(w.paid_amount + need_add_bamboo, 2)
                     w.paid_date = datetime.now().strftime("%Y-%m-%d")
                     w.paid_remark = (w.paid_remark + "; " if w.paid_remark else "") + "竹农付款清单自动标记"
                     updated_count += 1
@@ -460,7 +533,7 @@ def settle_farmer(
                 for f_name, wbs in sorted(farmer_groups.items()):
                     sub_total_w = sum(w.net_weight for w in wbs)
                     sub_total_v = sum(w.farmer_amount for w in wbs if w.farmer_amount > 0)
-                    sub_paid = sum(min(w.paid_amount, w.farmer_amount) for w in wbs if w.is_paid)
+                    sub_paid = sum(paid_bamboo(w) for w in wbs)
                     coop_rows.append({
                         "层级": "【竹农合计】",
                         "竹农": f_name,
@@ -469,8 +542,8 @@ def settle_farmer(
                         "单数": len(wbs),
                         "总净重(吨)": round(sub_total_w, 3),
                         "竹款(元)": round(sub_total_v, 2),
-                        "已付(元)": round(sub_paid, 2),
-                        "未付(元)": round(sub_total_v - sub_paid, 2),
+                        "已付竹款(元)": round(sub_paid, 2),
+                        "未付竹款(元)": round(sub_total_v - sub_paid, 2),
                     })
                     pp_groups: Dict[str, List[Waybill]] = defaultdict(list)
                     for w in wbs:
@@ -478,7 +551,7 @@ def settle_farmer(
                     for pp_name, pp_wbs in sorted(pp_groups.items()):
                         pp_w = sum(w.net_weight for w in pp_wbs)
                         pp_v = sum(w.farmer_amount for w in pp_wbs if w.farmer_amount > 0)
-                        pp_pd = sum(min(w.paid_amount, w.farmer_amount) for w in pp_wbs if w.is_paid)
+                        pp_pd = sum(paid_bamboo(w) for w in pp_wbs)
                         coop_rows.append({
                             "层级": "  ↳收购点小计",
                             "竹农": f_name,
@@ -487,8 +560,8 @@ def settle_farmer(
                             "单数": len(pp_wbs),
                             "总净重(吨)": round(pp_w, 3),
                             "竹款(元)": round(pp_v, 2),
-                            "已付(元)": round(pp_pd, 2),
-                            "未付(元)": round(pp_v - pp_pd, 2),
+                            "已付竹款(元)": round(pp_pd, 2),
+                            "未付竹款(元)": round(pp_v - pp_pd, 2),
                         })
                         bb_groups: Dict[str, List[Waybill]] = defaultdict(list)
                         for w in pp_wbs:
@@ -496,7 +569,7 @@ def settle_farmer(
                         for bb_name, bb_wbs in sorted(bb_groups.items()):
                             bb_w = sum(w.net_weight for w in bb_wbs)
                             bb_v = sum(w.farmer_amount for w in bb_wbs if w.farmer_amount > 0)
-                            bb_pd = sum(min(w.paid_amount, w.farmer_amount) for w in bb_wbs if w.is_paid)
+                            bb_pd = sum(paid_bamboo(w) for w in bb_wbs)
                             coop_rows.append({
                                 "层级": "    ↳竹种明细",
                                 "竹农": f_name,
@@ -505,8 +578,8 @@ def settle_farmer(
                                 "单数": len(bb_wbs),
                                 "总净重(吨)": round(bb_w, 3),
                                 "竹款(元)": round(bb_v, 2),
-                                "已付(元)": round(bb_pd, 2),
-                                "未付(元)": round(bb_v - bb_pd, 2),
+                                "已付竹款(元)": round(bb_pd, 2),
+                                "未付竹款(元)": round(bb_v - bb_pd, 2),
                             })
                 pd.DataFrame(coop_rows).to_excel(writer, sheet_name="合作社汇总(展开)", index=False)
                 bar.update(1)
@@ -520,59 +593,61 @@ def settle_farmer(
                     farmer_sheet_rows: List[Dict[str, Any]] = []
                     sub_total_w = sum(w.net_weight for w in wbs)
                     sub_total_v = sum(w.farmer_amount for w in wbs if w.farmer_amount > 0)
-                    sub_paid = sum(min(w.paid_amount, w.farmer_amount) for w in wbs if w.is_paid)
+                    sub_paid = sum(paid_bamboo(w) for w in wbs)
                     pp_count = len(set(w.purchase_point_name for w in wbs if w.purchase_point_name))
                     bb_count = len(set(w.bamboo_type_name for w in wbs if w.bamboo_type_name))
                     farmer_sheet_rows.append({
-                        "【竹农合计摘要】": f_name,
-                        "跨收购点": f"{pp_count} 个",
-                        "跨竹种": f"{bb_count} 个",
-                        "总单数": len(wbs),
-                        "总净重(吨)": round(sub_total_w, 3),
-                        "竹款合计(元)": round(sub_total_v, 2),
-                        "已付竹款(元)": round(sub_paid, 2),
+                        "运单号": f"竹农: {f_name}",
+                        "运输日期": f"跨 {pp_count} 个收购点 / 跨 {bb_count} 个竹种",
+                        "司机": f"总单数: {len(wbs)}",
+                        "车牌": format_weight(sub_total_w),
+                        "竹种": "",
+                        "装车点": "",
+                        "收购点": "",
+                        "净重(吨)": "竹款合计",
+                        "单价(元/吨)": round(sub_total_v, 2),
+                        "竹款(元)": "已付竹款",
+                        "状态(竹款口径)": round(sub_paid, 2),
+                        "已付竹款(元)": "未付竹款",
                         "未付竹款(元)": round(sub_total_v - sub_paid, 2),
-                        "收购点明细": "/".join(sorted(set(w.purchase_point_name or "未知" for w in wbs if w.purchase_point_name))),
-                        "竹种明细": "/".join(sorted(set(w.bamboo_type_name or "未知" for w in wbs if w.bamboo_type_name))),
+                        "付款日期": "收购点明细: " + "/".join(sorted(set(w.purchase_point_name or "未知" for w in wbs if w.purchase_point_name))),
+                        "备注": "竹种明细: " + "/".join(sorted(set(w.bamboo_type_name or "未知" for w in wbs if w.bamboo_type_name))),
                     })
-                    farmer_sheet_rows.append({})
-                    for w in wbs:
-                        farmer_sheet_rows.append({
-                            "【竹农合计摘要】": "↓运单明细",
-                            "跨收购点": w.waybill_no,
-                            "竹种明细": w.transport_date,
-                            "总单数": w.driver_name or "-",
-                            "总净重(吨)": w.license_plate or "-",
-                            "竹款合计(元)": w.bamboo_type_name or "-",
-                            "已付竹款(元)": w.loading_point_name or "-",
-                            "未付竹款(元)": w.purchase_point_name or "-",
-                            "收购点明细": round(w.net_weight, 3),
-                        })
                     farmer_sheet_rows.append({})
                     farmer_sheet_rows.append({
-                        "【竹农合计摘要】": "运单号",
-                        "跨收购点": "运输日期",
-                        "竹种明细": "司机",
-                        "总单数": "车牌",
-                        "总净重(吨)": "竹种",
-                        "竹款合计(元)": "装车点",
-                        "已付竹款(元)": "收购点",
-                        "未付竹款(元)": "净重(吨)",
-                        "收购点明细": "单价(元/吨)",
-                        "竹种明细(列10)": "竹款(元)",
+                        "运单号": "运单号",
+                        "运输日期": "运输日期",
+                        "司机": "司机",
+                        "车牌": "车牌",
+                        "竹种": "竹种",
+                        "装车点": "装车点",
+                        "收购点": "收购点",
+                        "净重(吨)": "净重(吨)",
+                        "单价(元/吨)": "单价(元/吨)",
+                        "竹款(元)": "竹款(元)",
+                        "状态(竹款口径)": "状态(竹款口径)",
+                        "已付竹款(元)": "已付竹款(元)",
+                        "未付竹款(元)": "未付竹款(元)",
+                        "付款日期": "付款日期",
+                        "备注": "备注",
                     })
                     for w in wbs:
                         farmer_sheet_rows.append({
-                            "【竹农合计摘要】": w.waybill_no,
-                            "跨收购点": w.transport_date,
-                            "竹种明细": w.driver_name or "-",
-                            "总单数": w.license_plate or "-",
-                            "总净重(吨)": w.bamboo_type_name or "-",
-                            "竹款合计(元)": w.loading_point_name or "-",
-                            "已付竹款(元)": w.purchase_point_name or "-",
-                            "未付竹款(元)": round(w.net_weight, 3),
-                            "收购点明细": round(w.unit_price, 2),
-                            "竹种明细(列10)": round(w.farmer_amount, 2),
+                            "运单号": w.waybill_no,
+                            "运输日期": w.transport_date,
+                            "司机": w.driver_name or "-",
+                            "车牌": w.license_plate or "-",
+                            "竹种": w.bamboo_type_name or "-",
+                            "装车点": w.loading_point_name or "-",
+                            "收购点": w.purchase_point_name or "-",
+                            "净重(吨)": round(w.net_weight, 3),
+                            "单价(元/吨)": round(w.unit_price, 2),
+                            "竹款(元)": round(w.farmer_amount, 2),
+                            "状态(竹款口径)": bamboo_status_text(w),
+                            "已付竹款(元)": paid_bamboo(w),
+                            "未付竹款(元)": unpaid_bamboo(w),
+                            "付款日期": w.paid_date,
+                            "备注": w.paid_remark or "",
                         })
                     df_per = pd.DataFrame(farmer_sheet_rows)
                     sheet_name = f"{f_name[:10]}"
@@ -598,12 +673,14 @@ def settle_farmer(
 @click.option("--amount", type=float, default=None, help="付款金额，默认全额")
 @click.option("--date", "paid_date", default=None, help="付款日期 (YYYY-MM-DD)，默认今天")
 @click.option("--remark", default="", help="付款备注")
-@click.option("--farmer", is_flag=True, help="同时标记竹农款项已付")
+@click.option("--farmer", is_flag=True, help="同时标记运费+竹农款项已付（两边都付全额）")
+@click.option("--freight-only", "freight_only", is_flag=True, help="只按运费口径付款（不抵扣竹款），优先用这个标记车队付款")
+@click.option("--bamboo-only", "bamboo_only", is_flag=True, help="只按竹款口径付款（不抵扣运费），用这个标记合作社单独付款")
 @click.pass_context
 def settle_pay(
     ctx, waybill_id: str, ids: str, driver_name: str,
     start_date: str, end_date: str, amount: float, paid_date: str,
-    remark: str, farmer: bool
+    remark: str, farmer: bool, freight_only: bool, bamboo_only: bool
 ):
     """标记运单已付款
 
@@ -611,7 +688,8 @@ def settle_pay(
     示例:
       bamboo settle pay --id WB00123
       bamboo settle pay --ids WB00123,WB00124,WB00125 --amount 500 --remark 现金支付
-      bamboo settle pay --driver 张三 --start-date 2024-01-01 --end-date 2024-01-31
+      bamboo settle pay --driver 张三 --start-date 2024-01-01 --end-date 2024-01-31 --freight-only
+      bamboo settle pay --farmer 陈竹生 --bamboo-only --start-date 2024-05-01 --end-date 2024-05-31
     """
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
@@ -643,6 +721,19 @@ def settle_pay(
         click.echo("\n❌ 未找到匹配的运单", err=True)
         return
 
+    if freight_only and bamboo_only:
+        click.echo("\n❌ --freight-only 和 --bamboo-only 不能同时使用", err=True)
+        return
+
+    if freight_only:
+        payment_target = "freight"
+    elif bamboo_only:
+        payment_target = "bamboo"
+    elif farmer:
+        payment_target = "both"
+    else:
+        payment_target = ""
+
     pd = paid_date or datetime.now().strftime("%Y-%m-%d")
     count = 0
     total_paid = 0.0
@@ -653,12 +744,17 @@ def settle_pay(
 
         w.is_paid = True
         if amount:
-            w.paid_amount += amount
+            w.paid_amount = round(w.paid_amount + amount, 2)
         else:
-            if farmer:
-                w.paid_amount = w.freight + w.farmer_amount
+            if payment_target == "both":
+                w.paid_amount = round(w.freight + w.farmer_amount, 2)
+            elif payment_target == "freight":
+                w.paid_amount = round(min(w.paid_amount, 0) + w.freight, 2) if w.freight > 0 else 0
+            elif payment_target == "bamboo":
+                w.paid_amount = round(min(w.paid_amount, 0) + w.farmer_amount, 2) if w.farmer_amount > 0 else 0
             else:
-                w.paid_amount = w.freight if w.freight > 0 else w.farmer_amount
+                w.paid_amount = round(w.freight if w.freight > 0 else w.farmer_amount, 2)
+        w.payment_target = payment_target
         w.paid_date = pd
         if remark:
             w.paid_remark = (w.paid_remark + "; " if w.paid_remark else "") + remark
@@ -669,7 +765,15 @@ def settle_pay(
 
     store.save_waybills(waybills)
 
-    click.echo(f"\n✅ 已标记付款:")
+    target_desc = ""
+    if payment_target == "freight":
+        target_desc = "（运费口径，不抵扣竹款）"
+    elif payment_target == "bamboo":
+        target_desc = "（竹款口径，不抵扣运费）"
+    elif payment_target == "both":
+        target_desc = "（运费+竹款两边都付）"
+
+    click.echo(f"\n✅ 已标记付款{target_desc}:")
     click.echo(f"  运单数量: {count} 条")
     click.echo(f"  付款金额: {format_money(total_paid)}")
     click.echo(f"  付款日期: {pd}")

@@ -159,6 +159,7 @@ class Waybill:
     paid_amount: float = 0.0
     paid_date: str = ""
     paid_remark: str = ""
+    payment_target: str = ""
     farmer_id: str = ""
     farmer_name: str = ""
     farmer_phone: str = ""
