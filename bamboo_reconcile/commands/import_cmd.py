@@ -236,53 +236,119 @@ def _row_to_weight_note(row: pd.Series, index: int) -> WeightNote:
     return n
 
 
-@click.command("import")
+@click.group("import", invoke_without_command=True)
 @click.option("--type", "import_type", type=click.Choice(["waybill", "weight", "auto"]),
               default="auto", help="导入类型: waybill(运单), weight(磅单), auto(自动识别)")
-@click.option("--file", "filepath", required=True, type=click.Path(exists=True), help="要导入的 Excel/CSV 文件路径")
+@click.option("--file", "filepath", type=click.Path(exists=True), default=None, help="要导入的 Excel/CSV 文件路径")
 @click.option("--sheet", "sheet_name", default=None, help="Excel 工作表名称 (可选)")
 @click.option("--dry-run", is_flag=True, help="试运行，不实际保存数据")
 @click.pass_context
-def cmd_import(ctx, import_type: str, filepath: str, sheet_name: Optional[str], dry_run: bool):
-    """导入运单文件或磅单照片清单
+def cmd_import(ctx, import_type: str, filepath: Optional[str], sheet_name: Optional[str], dry_run: bool):
+    """导入运单文件或磅单照片清单 (默认: import --file xxx.xlsx)
+
+    \b
+    子命令:
+      rollback  - 撤回指定批次的导入记录
 
     \b
     示例:
       bamboo import --file 运单202401.xlsx
       bamboo import --type waybill --file 运单.csv
       bamboo import --type weight --file 磅单清单.xlsx --dry-run
+      bamboo import rollback --id IMP202401010001
+    """
+    if ctx.invoked_subcommand is None:
+        if not filepath:
+            click.echo("\n❌ 请指定 --file 导入文件，或使用 bamboo import rollback 撤回批次", err=True)
+            ctx.exit(1)
+
+        store: DataStore = ctx.obj["store"]
+        filename = os.path.basename(filepath)
+
+        click.echo(f"\n开始导入文件: {filename}")
+        click.echo(f"导入类型: {import_type}")
+
+        try:
+            df = read_excel_file(filepath, sheet_name)
+        except Exception as e:
+            click.echo(f"❌ 读取文件失败: {e}", err=True)
+            return
+
+        click.echo(f"读取到 {len(df)} 行数据")
+
+        if import_type == "auto":
+            has_waybill_cols = any(c in WAYBILL_COLUMN_MAPPING for c in df.columns)
+            has_weight_cols = any(c in WEIGHT_NOTE_COLUMN_MAPPING for c in df.columns)
+            if has_waybill_cols and not has_weight_cols:
+                import_type = "waybill"
+            elif has_weight_cols and not has_waybill_cols:
+                import_type = "weight"
+            elif "运单号" in df.columns or "司机姓名" in df.columns or "竹种" in df.columns:
+                import_type = "waybill"
+            else:
+                import_type = "waybill"
+            click.echo(f"自动识别导入类型: {import_type}")
+
+        if import_type == "waybill":
+            _import_waybills(store, df, filepath, dry_run)
+        else:
+            _import_weight_notes(store, df, filepath, dry_run)
+
+
+@cmd_import.command("rollback")
+@click.option("--id", "batch_id", required=True, help="要撤回的批次号或批次ID (如 IMP202606100001)")
+@click.option("--operator", default="财务管理员", help="操作人")
+@click.option("--yes", is_flag=True, help="跳过确认直接撤回")
+@click.pass_context
+def cmd_import_rollback(ctx, batch_id: str, operator: str, yes: bool):
+    """撤回一次导入的运单或磅单记录
+
+    \b
+    示例:
+      bamboo import rollback --id IMP202606100001
+      bamboo import rollback --id IMP202606100002 --yes --operator 张会计
     """
     store: DataStore = ctx.obj["store"]
-    filename = os.path.basename(filepath)
+    batch = store.find_import_batch(batch_id)
+    if not batch:
+        click.echo(f"\n❌ 未找到批次: {batch_id}", err=True)
+        ctx.exit(1)
 
-    click.echo(f"\n开始导入文件: {filename}")
-    click.echo(f"导入类型: {import_type}")
-
-    try:
-        df = read_excel_file(filepath, sheet_name)
-    except Exception as e:
-        click.echo(f"❌ 读取文件失败: {e}", err=True)
+    if batch.is_rollback:
+        click.echo(f"\n⚠️  该批次已于 {batch.rollback_time} 由 {batch.rollback_operator} 撤回，无需重复操作")
         return
 
-    click.echo(f"读取到 {len(df)} 行数据")
+    click.echo(f"\n即将撤回批次: {batch.batch_no}")
+    click.echo(f"  导入类型: {batch.import_type}")
+    click.echo(f"  源文件:   {os.path.basename(batch.source_file)}")
+    click.echo(f"  导入时间: {batch.import_time[:19].replace('T', ' ')}")
+    click.echo(f"  运单数:   {len(batch.waybill_ids)} 条")
+    click.echo(f"  磅单数:   {len(batch.weight_note_ids)} 条")
+    if batch.duplicate_count:
+        click.echo(f"  含重复运单: {batch.duplicate_count} 条")
 
-    if import_type == "auto":
-        has_waybill_cols = any(c in WAYBILL_COLUMN_MAPPING for c in df.columns)
-        has_weight_cols = any(c in WEIGHT_NOTE_COLUMN_MAPPING for c in df.columns)
-        if has_waybill_cols and not has_weight_cols:
-            import_type = "waybill"
-        elif has_weight_cols and not has_waybill_cols:
-            import_type = "weight"
-        elif "运单号" in df.columns or "司机姓名" in df.columns or "竹种" in df.columns:
-            import_type = "waybill"
-        else:
-            import_type = "waybill"
-        click.echo(f"自动识别导入类型: {import_type}")
+    if not yes:
+        click.confirm("\n确认撤回以上数据？撤回后不可恢复！", abort=True)
 
-    if import_type == "waybill":
-        _import_waybills(store, df, filepath, dry_run)
-    else:
-        _import_weight_notes(store, df, filepath, dry_run)
+    removed_wb = 0
+    removed_wn = 0
+    if batch.waybill_ids:
+        removed_wb = store.delete_waybills_by_ids(batch.waybill_ids)
+    if batch.weight_note_ids:
+        removed_wn = store.delete_weight_notes_by_ids(batch.weight_note_ids)
+
+    from datetime import datetime
+    batch.is_rollback = True
+    batch.rollback_time = datetime.now().isoformat()
+    batch.rollback_operator = operator
+    batch.remark = (batch.remark + "; " if batch.remark else "") + f"已撤回(删除运单{removed_wb}条,磅单{removed_wn}条)"
+    store.update_import_batch(batch)
+
+    click.echo(f"\n✅ 批次撤回完成！")
+    click.echo(f"  已删除运单: {removed_wb} 条")
+    click.echo(f"  已删除磅单: {removed_wn} 条")
+    click.echo(f"  操作人: {operator}")
+    click.echo(f"  撤回时间: {batch.rollback_time[:19].replace('T', ' ')}")
 
 
 def _import_waybills(store: DataStore, df: pd.DataFrame, filepath: str, dry_run: bool):
@@ -354,12 +420,79 @@ def _import_waybills(store: DataStore, df: pd.DataFrame, filepath: str, dry_run:
         if len(errors) > 20:
             click.echo(f"  ... 还有 {len(errors) - 20} 条问题未显示")
 
+    duplicate_details: List[Dict[str, Any]] = []
+    if waybills:
+        existing_wbs = store.load_waybills()
+        hist_by_no: Dict[str, Waybill] = {}
+        hist_by_key: Dict[str, List[Waybill]] = {}
+        for hw in existing_wbs:
+            if hw.waybill_no:
+                hist_by_no[hw.waybill_no] = hw
+            if hw.license_plate and hw.transport_date:
+                key = f"{hw.license_plate}|{hw.transport_date}|{round(hw.net_weight, 2)}"
+                hist_by_key.setdefault(key, []).append(hw)
+
+        for w in waybills:
+            reasons = []
+            matched_hist_id = ""
+            matched_hist_no = ""
+
+            if w.waybill_no and w.waybill_no in hist_by_no:
+                hw = hist_by_no[w.waybill_no]
+                reasons.append(f"运单号重复({hw.waybill_no})")
+                matched_hist_id = hw.id
+                matched_hist_no = hw.waybill_no
+
+            if w.license_plate and w.transport_date:
+                key = f"{w.license_plate}|{w.transport_date}|{round(w.net_weight, 2)}"
+                if key in hist_by_key and not matched_hist_id:
+                    hw_list = hist_by_key[key]
+                    if hw_list:
+                        hw = hw_list[0]
+                        reasons.append(f"同车牌+日期+净重重复({hw.license_plate} {hw.transport_date} {round(hw.net_weight,2)}吨)")
+                        matched_hist_id = hw.id
+                        matched_hist_no = hw.waybill_no
+
+            if reasons:
+                w.is_duplicate = True
+                w.duplicate_of = matched_hist_id
+                for r in reasons:
+                    w.add_exception(r)
+                h_wb = hist_by_no.get(matched_hist_no) if matched_hist_no in hist_by_no else None
+                if not h_wb and matched_hist_id:
+                    for hw in existing_wbs:
+                        if hw.id == matched_hist_id:
+                            h_wb = hw
+                            break
+                duplicate_details.append({
+                    "行号": waybills.index(w) + 2,
+                    "新运单号": w.waybill_no,
+                    "新车牌": w.license_plate,
+                    "新日期": w.transport_date,
+                    "新净重": round(w.net_weight, 3),
+                    "重复原因": " + ".join(reasons),
+                    "历史运单ID": matched_hist_id,
+                    "历史运单号": matched_hist_no,
+                    "历史车牌": h_wb.license_plate if h_wb else "-",
+                    "历史日期": h_wb.transport_date if h_wb else "-",
+                    "历史净重": round(h_wb.net_weight, 3) if h_wb else "",
+                })
+
+    if duplicate_details:
+        click.echo(f"\n⚠️  发现和历史数据重复的运单: {len(duplicate_details)} 条")
+        print_table(
+            [[d["行号"], d["新运单号"], d["重复原因"], d["历史运单号"]] for d in duplicate_details[:20]],
+            ["行号", "新运单号", "重复原因", "历史运单号"],
+            "重复运单清单 (最多显示20条)"
+        )
+
     if dry_run:
         click.echo("\n⚠️  试运行模式，未保存任何数据")
         return
 
     seq = len(store.load_import_batches()) + 1
     batch_no = generate_serial_no("IMP", seq)
+    dup_count = sum(1 for w in waybills if w.is_duplicate)
     batch = ImportBatch(
         batch_no=batch_no,
         import_type="运单",
@@ -368,11 +501,12 @@ def _import_waybills(store: DataStore, df: pd.DataFrame, filepath: str, dry_run:
         success_count=len(waybills) - len(errors),
         error_count=len(errors),
         warning_count=warning_count,
-        duplicate_count=sum(1 for w in waybills if w.is_duplicate),
+        duplicate_count=dup_count,
         exception_count=sum(1 for w in waybills if w.exceptions),
         operator="导入系统",
         error_details=errors[:200],
-        remark=f"从 {os.path.basename(filepath)} 导入运单"
+        duplicate_details=duplicate_details[:200],
+        remark=f"从 {os.path.basename(filepath)} 导入运单, 重复{dup_count}条"
     )
 
     for w in waybills:
@@ -392,6 +526,8 @@ def _import_waybills(store: DataStore, df: pd.DataFrame, filepath: str, dry_run:
     summary.append(["总毛重", f"{total_gross:.3f} 吨"])
     summary.append(["总净重", f"{total_net:.3f} 吨"])
     summary.append(["异常单数", f"{batch.exception_count} 条"])
+    if dup_count:
+        summary.append(["重复运单", f"{dup_count} 条"])
     print_table(summary, ["统计项", "数值"], "导入汇总")
 
 

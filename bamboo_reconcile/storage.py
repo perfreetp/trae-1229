@@ -124,9 +124,27 @@ class DataStore:
             return True
         return False
 
+    def delete_waybills_by_ids(self, waybill_ids: List[str]) -> int:
+        id_set = set(waybill_ids)
+        waybills = self.load_waybills()
+        original_len = len(waybills)
+        remaining = [w for w in waybills if w.id not in id_set]
+        removed = original_len - len(remaining)
+        if removed > 0:
+            self.save_waybills(remaining)
+        return removed
+
     def find_waybill(self, waybill_id: str) -> Optional[Waybill]:
         for w in self.load_waybills():
             if w.id == waybill_id:
+                return w
+        return None
+
+    def find_waybill_by_no(self, waybill_no: str) -> Optional[Waybill]:
+        if not waybill_no:
+            return None
+        for w in self.load_waybills():
+            if w.waybill_no == waybill_no:
                 return w
         return None
 
@@ -157,6 +175,24 @@ class DataStore:
                 self.save_weight_notes(notes)
                 return True
         return False
+
+    def delete_weight_notes_by_ids(self, note_ids: List[str]) -> int:
+        id_set = set(note_ids)
+        notes = self.load_weight_notes()
+        original_len = len(notes)
+        removed_notes = [n for n in notes if n.id in id_set]
+        remaining = [n for n in notes if n.id not in id_set]
+        removed = original_len - len(remaining)
+        if removed > 0:
+            self.save_weight_notes(remaining)
+            matched_waybill_ids = [n.matched_waybill_id for n in removed_notes if n.matched and n.matched_waybill_id]
+            if matched_waybill_ids:
+                waybills = self.load_waybills()
+                for w in waybills:
+                    if w.id in matched_waybill_ids:
+                        w.weight_note_photo = ""
+                self.save_waybills(waybills)
+        return removed
 
     # ===== Pricing Rules =====
     def load_pricing_rules(self) -> List[PricingRule]:
@@ -223,6 +259,18 @@ class DataStore:
             if v.license_plate == license_plate:
                 return v
         return None
+
+    def add_vehicle(self, vehicle: Vehicle) -> Vehicle:
+        vehicles = self.load_vehicles()
+        vehicles.append(vehicle)
+        self.save_vehicles(vehicles)
+        return vehicle
+
+    def add_vehicles_batch(self, vehicles: List[Vehicle]) -> int:
+        existing = self.load_vehicles()
+        existing.extend(vehicles)
+        self.save_vehicles(existing)
+        return len(vehicles)
 
     # ===== Bamboo Types =====
     def load_bamboo_types(self) -> List[BambooType]:
@@ -318,6 +366,15 @@ class DataStore:
             if b.id == batch_id or b.batch_no == batch_id:
                 return b
         return None
+
+    def update_import_batch(self, batch: ImportBatch) -> bool:
+        batches = self.load_import_batches()
+        for i, b in enumerate(batches):
+            if b.id == batch.id:
+                batches[i] = batch
+                self.save_import_batches(batches)
+                return True
+        return False
 
     def get_waybills_by_batch(self, batch_id: str) -> List[Waybill]:
         batch = self.find_import_batch(batch_id)

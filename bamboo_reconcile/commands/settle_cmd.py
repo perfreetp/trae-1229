@@ -103,9 +103,9 @@ def settle_driver(
 
         total_weight = sum(w.net_weight for w in wbs)
         total_freight = sum(w.freight for w in wbs)
-        paid_amount = sum(w.paid_amount for w in wbs if w.is_paid)
-        unpaid_count = sum(1 for w in wbs if not w.is_paid)
-        paid_count = sum(1 for w in wbs if w.is_paid)
+        paid_amount = sum(min(w.paid_amount, w.freight) for w in wbs if w.is_paid)
+        unpaid_count = sum(1 for w in wbs if (not w.is_paid) or (w.paid_amount < w.freight))
+        paid_count = sum(1 for w in wbs if w.is_paid and w.paid_amount >= w.freight)
         unpaid_amount = total_freight - paid_amount
 
         settlement_no = generate_serial_no("DS", idx)
@@ -440,7 +440,7 @@ def settle_farmer(
 
         import pandas as pd
         os.makedirs(os.path.dirname(export_path), exist_ok=True)
-        total_sheets = 2 + len(farmer_groups)
+        total_sheets = 3 + len(farmer_groups)
         with click.progressbar(length=total_sheets, label="导出付款清单") as bar:
             with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
                 df_pay = pd.DataFrame([
@@ -456,33 +456,123 @@ def settle_farmer(
                 df_pay.to_excel(writer, sheet_name="付款清单汇总", index=False)
                 bar.update(1)
 
+                coop_rows: List[Dict[str, Any]] = []
+                for f_name, wbs in sorted(farmer_groups.items()):
+                    sub_total_w = sum(w.net_weight for w in wbs)
+                    sub_total_v = sum(w.farmer_amount for w in wbs if w.farmer_amount > 0)
+                    sub_paid = sum(min(w.paid_amount, w.farmer_amount) for w in wbs if w.is_paid)
+                    coop_rows.append({
+                        "层级": "【竹农合计】",
+                        "竹农": f_name,
+                        "收购点": "合计",
+                        "竹种": "合计",
+                        "单数": len(wbs),
+                        "总净重(吨)": round(sub_total_w, 3),
+                        "竹款(元)": round(sub_total_v, 2),
+                        "已付(元)": round(sub_paid, 2),
+                        "未付(元)": round(sub_total_v - sub_paid, 2),
+                    })
+                    pp_groups: Dict[str, List[Waybill]] = defaultdict(list)
+                    for w in wbs:
+                        pp_groups[w.purchase_point_name or "未知收购点"].append(w)
+                    for pp_name, pp_wbs in sorted(pp_groups.items()):
+                        pp_w = sum(w.net_weight for w in pp_wbs)
+                        pp_v = sum(w.farmer_amount for w in pp_wbs if w.farmer_amount > 0)
+                        pp_pd = sum(min(w.paid_amount, w.farmer_amount) for w in pp_wbs if w.is_paid)
+                        coop_rows.append({
+                            "层级": "  ↳收购点小计",
+                            "竹农": f_name,
+                            "收购点": pp_name,
+                            "竹种": "小计",
+                            "单数": len(pp_wbs),
+                            "总净重(吨)": round(pp_w, 3),
+                            "竹款(元)": round(pp_v, 2),
+                            "已付(元)": round(pp_pd, 2),
+                            "未付(元)": round(pp_v - pp_pd, 2),
+                        })
+                        bb_groups: Dict[str, List[Waybill]] = defaultdict(list)
+                        for w in pp_wbs:
+                            bb_groups[w.bamboo_type_name or "未知竹种"].append(w)
+                        for bb_name, bb_wbs in sorted(bb_groups.items()):
+                            bb_w = sum(w.net_weight for w in bb_wbs)
+                            bb_v = sum(w.farmer_amount for w in bb_wbs if w.farmer_amount > 0)
+                            bb_pd = sum(min(w.paid_amount, w.farmer_amount) for w in bb_wbs if w.is_paid)
+                            coop_rows.append({
+                                "层级": "    ↳竹种明细",
+                                "竹农": f_name,
+                                "收购点": pp_name,
+                                "竹种": bb_name,
+                                "单数": len(bb_wbs),
+                                "总净重(吨)": round(bb_w, 3),
+                                "竹款(元)": round(bb_v, 2),
+                                "已付(元)": round(bb_pd, 2),
+                                "未付(元)": round(bb_v - bb_pd, 2),
+                            })
+                pd.DataFrame(coop_rows).to_excel(writer, sheet_name="合作社汇总(展开)", index=False)
+                bar.update(1)
+
                 if all_details:
                     df_detail = pd.DataFrame(all_details)
                     df_detail.to_excel(writer, sheet_name="全部运单明细", index=False)
                 bar.update(1)
 
                 for f_name, wbs in farmer_groups.items():
-                    farmer_sheet_rows = []
+                    farmer_sheet_rows: List[Dict[str, Any]] = []
+                    sub_total_w = sum(w.net_weight for w in wbs)
+                    sub_total_v = sum(w.farmer_amount for w in wbs if w.farmer_amount > 0)
+                    sub_paid = sum(min(w.paid_amount, w.farmer_amount) for w in wbs if w.is_paid)
+                    pp_count = len(set(w.purchase_point_name for w in wbs if w.purchase_point_name))
+                    bb_count = len(set(w.bamboo_type_name for w in wbs if w.bamboo_type_name))
+                    farmer_sheet_rows.append({
+                        "【竹农合计摘要】": f_name,
+                        "跨收购点": f"{pp_count} 个",
+                        "跨竹种": f"{bb_count} 个",
+                        "总单数": len(wbs),
+                        "总净重(吨)": round(sub_total_w, 3),
+                        "竹款合计(元)": round(sub_total_v, 2),
+                        "已付竹款(元)": round(sub_paid, 2),
+                        "未付竹款(元)": round(sub_total_v - sub_paid, 2),
+                        "收购点明细": "/".join(sorted(set(w.purchase_point_name or "未知" for w in wbs if w.purchase_point_name))),
+                        "竹种明细": "/".join(sorted(set(w.bamboo_type_name or "未知" for w in wbs if w.bamboo_type_name))),
+                    })
+                    farmer_sheet_rows.append({})
                     for w in wbs:
                         farmer_sheet_rows.append({
-                            "竹农": f_name,
-                            "运单号": w.waybill_no,
-                            "运输日期": w.transport_date,
-                            "司机": w.driver_name or "-",
-                            "车牌": w.license_plate or "-",
-                            "竹种": w.bamboo_type_name or "-",
-                            "装车点": w.loading_point_name or "-",
-                            "收购点": w.purchase_point_name or "-",
-                            "净重(吨)": round(w.net_weight, 3),
-                            "单价(元/吨)": round(w.unit_price, 2),
-                            "竹款(元)": round(w.farmer_amount, 2),
-                            "运费(元)": round(w.freight, 2),
-                            "合计(元)": round(w.freight + w.farmer_amount, 2),
-                            "已付金额": round(min(w.paid_amount, w.farmer_amount), 2) if w.is_paid else 0,
-                            "付款日期": w.paid_date or "-",
-                            "状态": "已付款" if (w.is_paid and w.paid_amount >= w.farmer_amount) else "未付款",
-                            "磅单号": w.weight_note_no or "-",
-                            "备注": w.paid_remark or w.remark or "",
+                            "【竹农合计摘要】": "↓运单明细",
+                            "跨收购点": w.waybill_no,
+                            "竹种明细": w.transport_date,
+                            "总单数": w.driver_name or "-",
+                            "总净重(吨)": w.license_plate or "-",
+                            "竹款合计(元)": w.bamboo_type_name or "-",
+                            "已付竹款(元)": w.loading_point_name or "-",
+                            "未付竹款(元)": w.purchase_point_name or "-",
+                            "收购点明细": round(w.net_weight, 3),
+                        })
+                    farmer_sheet_rows.append({})
+                    farmer_sheet_rows.append({
+                        "【竹农合计摘要】": "运单号",
+                        "跨收购点": "运输日期",
+                        "竹种明细": "司机",
+                        "总单数": "车牌",
+                        "总净重(吨)": "竹种",
+                        "竹款合计(元)": "装车点",
+                        "已付竹款(元)": "收购点",
+                        "未付竹款(元)": "净重(吨)",
+                        "收购点明细": "单价(元/吨)",
+                        "竹种明细(列10)": "竹款(元)",
+                    })
+                    for w in wbs:
+                        farmer_sheet_rows.append({
+                            "【竹农合计摘要】": w.waybill_no,
+                            "跨收购点": w.transport_date,
+                            "竹种明细": w.driver_name or "-",
+                            "总单数": w.license_plate or "-",
+                            "总净重(吨)": w.bamboo_type_name or "-",
+                            "竹款合计(元)": w.loading_point_name or "-",
+                            "已付竹款(元)": w.purchase_point_name or "-",
+                            "未付竹款(元)": round(w.net_weight, 3),
+                            "收购点明细": round(w.unit_price, 2),
+                            "竹种明细(列10)": round(w.farmer_amount, 2),
                         })
                     df_per = pd.DataFrame(farmer_sheet_rows)
                     sheet_name = f"{f_name[:10]}"
@@ -494,7 +584,7 @@ def settle_farmer(
                     bar.update(1)
 
         click.echo(f"\n✅ 竹农付款清单已导出: {export_path}")
-        click.echo(f"   包含: 付款汇总 + 全部明细 + {len(farmer_groups)} 个竹农分Sheet")
+        click.echo(f"   包含: 付款汇总 + 合作社汇总(展开) + 全部明细 + {len(farmer_groups)} 个竹农分Sheet")
 
     return payment_list
 

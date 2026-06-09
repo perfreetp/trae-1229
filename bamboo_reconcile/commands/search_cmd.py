@@ -623,15 +623,38 @@ def search_batch(ctx, list_batch: bool, show_detail: bool, show_waybills: bool,
             ["源文件", batch.source_file],
             ["操作人", batch.operator or "-"],
             ["导入时间", batch.import_time[:19].replace("T", " ")],
+            ["状态", "✅ 已撤回" if batch.is_rollback else "正常"],
             ["总行数", f"{batch.total_count} 行"],
             ["成功", f"{batch.success_count} 行"],
             ["失败", f"{batch.error_count} 行"],
             ["警告", f"{batch.warning_count} 条"],
             ["异常运单", f"{batch.exception_count} 条"],
             ["重复运单", f"{batch.duplicate_count} 条"],
-            ["备注", batch.remark or "-"],
         ]
+        if batch.is_rollback:
+            info.append(["撤回时间", batch.rollback_time[:19].replace("T", " ")])
+            info.append(["撤回人", batch.rollback_operator])
+        info.append(["备注", batch.remark or "-"])
         print_table(info, ["项目", "内容"], f"批次详情 - {batch.batch_no}")
+
+        if batch.duplicate_details:
+            click.echo(f"\n重复运单明细 (共 {len(batch.duplicate_details)} 条):")
+            dup_data = [[
+                i + 1,
+                d.get("新运单号", "-"),
+                d.get("新车牌", "-"),
+                d.get("新日期", "-"),
+                f"{d.get('新净重', 0)}吨",
+                d.get("重复原因", "-"),
+                d.get("历史运单号", "-"),
+                d.get("历史车牌", "-"),
+                f"{d.get('历史净重', '')}吨" if d.get("历史净重", "") else "-",
+            ] for i, d in enumerate(batch.duplicate_details[:30])]
+            print_table(dup_data, [
+                "序", "新运单号", "新车牌", "新日期", "新净重", "重复原因", "历史运单号", "历史车牌", "历史净重"
+            ], f"重复清单 (前{min(30, len(batch.duplicate_details))}条)")
+            if len(batch.duplicate_details) > 30:
+                click.echo(f"  ... 还有 {len(batch.duplicate_details) - 30} 条")
 
         if batch.error_details:
             click.echo(f"\n错误明细 (共 {len(batch.error_details)} 条):")
@@ -708,20 +731,23 @@ def search_batch(ctx, list_batch: bool, show_detail: bool, show_waybills: bool,
         src = b.source_file
         if len(src) > 30:
             src = "..." + src[-27:]
+        status = "撤回" if b.is_rollback else "正常"
         data.append([
             idx,
             b.batch_no,
             b.import_time[:10],
             b.import_type,
+            status,
             src,
             b.total_count,
             b.success_count,
             b.error_count,
+            b.duplicate_count,
             b.exception_count,
             b.operator or "-"
         ])
     print_table(
         data,
-        ["序", "批次号", "日期", "类型", "源文件", "总行", "成功", "失败", "异常", "操作人"],
+        ["序", "批次号", "日期", "类型", "状态", "源文件", "总行", "成功", "失败", "重复", "异常", "操作人"],
         f"导入批次记录 (共{len(batches)}条, 最近{limit}条)"
     )

@@ -264,6 +264,10 @@ class ImportBatch:
     waybill_ids: List[str] = field(default_factory=list)
     weight_note_ids: List[str] = field(default_factory=list)
     error_details: List[Dict[str, Any]] = field(default_factory=list)
+    duplicate_details: List[Dict[str, Any]] = field(default_factory=list)
+    is_rollback: bool = False
+    rollback_time: str = ""
+    rollback_operator: str = ""
     remark: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 

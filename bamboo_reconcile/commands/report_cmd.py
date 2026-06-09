@@ -292,22 +292,29 @@ def report_summary(ctx, start_date: str, end_date: str, group_by: str, diff: boo
         import pandas as pd
         os.makedirs(os.path.dirname(export_path), exist_ok=True)
 
-        extra_dims = {}
-        if group_by != "driver":
-            dim_wbs: Dict[str, List[Waybill]] = defaultdict(list)
-            for w in waybills:
-                dim_wbs[w.driver_name or "未知司机"].append(w)
-            extra_dims["差异_按司机"] = dim_wbs
-        if group_by != "purchase":
-            dim_wbs = defaultdict(list)
-            for w in waybills:
-                dim_wbs[w.purchase_point_name or "未知收购点"].append(w)
-            extra_dims["差异_按收购点"] = dim_wbs
-        if group_by != "bamboo":
-            dim_wbs = defaultdict(list)
-            for w in waybills:
-                dim_wbs[w.bamboo_type_name or "未知竹种"].append(w)
-            extra_dims["差异_按竹种"] = dim_wbs
+        if diff:
+            extra_dims = {}
+            if group_by != "driver":
+                dim_wbs: Dict[str, List[Waybill]] = defaultdict(list)
+                for w in waybills:
+                    dim_wbs[w.driver_name or "未知司机"].append(w)
+                extra_dims["差异_按司机"] = dim_wbs
+            if group_by != "purchase":
+                dim_wbs = defaultdict(list)
+                for w in waybills:
+                    dim_wbs[w.purchase_point_name or "未知收购点"].append(w)
+                extra_dims["差异_按收购点"] = dim_wbs
+            if group_by != "bamboo":
+                dim_wbs = defaultdict(list)
+                for w in waybills:
+                    dim_wbs[w.bamboo_type_name or "未知竹种"].append(w)
+                extra_dims["差异_按竹种"] = dim_wbs
+            categories = ["已付款", "未付款", "异常单", "缺磅单照片", "未计价"]
+            keys = ["paid", "unpaid", "exception", "no_photo", "no_price"]
+        else:
+            extra_dims = {}
+            categories = []
+            keys = []
 
         total_sheets = 2 + (1 if diff_export_rows else 0) + len(extra_dims)
         with click.progressbar(length=total_sheets, label="导出对账报表") as bar:
@@ -344,14 +351,12 @@ def report_summary(ctx, start_date: str, end_date: str, group_by: str, diff: boo
                 pd.DataFrame(detail).to_excel(writer, sheet_name="运单明细", index=False)
                 bar.update(1)
 
-                if diff_export_rows:
+                if diff_export_rows and diff:
                     diff_df = pd.DataFrame(diff_export_rows)
                     diff_df.to_excel(writer, sheet_name=f"差异_按{header_name}", index=False)
                     bar.update(1)
 
                     overall_rows = []
-                    categories = ["已付款", "未付款", "异常单", "缺磅单照片", "未计价"]
-                    keys = ["paid", "unpaid", "exception", "no_photo", "no_price"]
                     for cat, k in zip(categories, keys):
                         overall_rows.append({
                             "分组": "【整体合计】",
@@ -381,7 +386,10 @@ def report_summary(ctx, start_date: str, end_date: str, group_by: str, diff: boo
                     bar.update(1)
 
         click.echo(f"\n✅ 对账报表已导出: {export_path}")
-        click.echo(f"   Sheet: 汇总数据 + 运单明细 + 差异视图({1 + len(extra_dims)}个维度)")
+        if diff:
+            click.echo(f"   Sheet: 汇总数据 + 运单明细 + 差异视图({1 + len(extra_dims)}个维度)")
+        else:
+            click.echo(f"   Sheet: 汇总数据 + 运单明细")
 
 
 @report.command("purchase")
@@ -823,3 +831,205 @@ def report_daily(ctx, report_date: str):
     driver_data = [[i + 1, name, d[0], format_weight(d[1])]
                    for i, (name, d) in enumerate(sorted(driver_groups.items(), key=lambda x: -x[1][1]))]
     print_table(driver_data, ["序", "司机(车牌)", "趟数", "运输总量"], "当日司机运输")
+
+
+@report.command("month-close")
+@click.option("--start-date", required=True, help="月结开始日期 (YYYY-MM-DD)")
+@click.option("--end-date", required=True, help="月结结束日期 (YYYY-MM-DD)")
+@click.option("--export", "export_path", default=None, help="导出 Excel 月结包路径")
+@click.pass_context
+def report_month_close(ctx, start_date: str, end_date: str, export_path: str):
+    """生成月结复核包，财务月底直接拿包核对
+
+    \b
+    月结包包含:
+      1. 月结总览       - 运单数/吨数/运费/竹款/已付/未付/异常/缺照片
+      2. 司机运费汇总   - 按司机净重/运费/已付运费/未付运费
+      3. 竹农竹款汇总   - 按竹农净重/竹款/已付竹款/未付竹款 (合作社口径)
+      4. 未付款明细     - 区分司机运费未付 & 竹农竹款未付
+      5. 异常待补清单   - 所有异常运单(校验/缺资料/重复等)
+      6. 缺磅单照片     - 已录入磅单号但无照片记录
+
+    \b
+    示例:
+      bamboo report month-close --start-date 2026-05-01 --end-date 2026-05-31
+      bamboo report month-close --start 2026-05-01 --end 2026-05-31 --export 2026年5月月结包.xlsx
+    """
+    store: DataStore = ctx.obj["store"]
+    waybills = store.load_waybills()
+    waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
+    waybills = filter_effective_waybills(waybills)
+
+    if not waybills:
+        click.echo(f"\n❌ 日期范围 {start_date} ~ {end_date} 没有有效运单")
+        return
+
+    total_cnt = len(waybills)
+    total_net = sum(w.net_weight for w in waybills)
+    total_freight = sum(w.freight for w in waybills)
+    total_bamboo = sum(w.bamboo_value for w in waybills)
+    driver_cnt = len(set(w.driver_name for w in waybills if w.driver_name))
+    farmer_cnt = len(set(w.farmer_name for w in waybills if w.farmer_name))
+    vehicle_cnt = len(set(w.license_plate for w in waybills if w.license_plate))
+
+    paid_freight = sum(min(w.paid_amount, w.freight) for w in waybills if w.is_paid)
+    unpaid_freight = total_freight - paid_freight
+    paid_bamboo = sum(max(0, w.paid_amount - w.freight) for w in waybills if w.is_paid and w.paid_amount > w.freight)
+    unpaid_bamboo = total_bamboo - paid_bamboo
+
+    exc_wbs = [w for w in waybills if w.exceptions]
+    no_photo_wbs = [w for w in waybills if w.weight_note_no and not w.weight_note_photo]
+    unpaid_wbs = [w for w in waybills if not w.is_paid or w.paid_amount < w.freight + w.bamboo_value]
+    dup_wbs = [w for w in waybills if w.is_duplicate]
+
+    overview = [
+        ["月结期间", f"{start_date} ~ {end_date}"],
+        ["运单总数", f"{total_cnt} 条"],
+        ["运输车辆", f"{vehicle_cnt} 辆"],
+        ["司机人数", f"{driver_cnt} 人"],
+        ["竹农户数", f"{farmer_cnt} 户"],
+        ["总净重", format_weight(total_net)],
+        ["运费合计", format_money(total_freight)],
+        ["竹款合计", format_money(total_bamboo)],
+        ["应付总额", format_money(total_freight + total_bamboo)],
+        ["--- 已付口径 ---", ""],
+        ["已付运费(车队)", format_money(paid_freight)],
+        ["未付运费(车队)", format_money(unpaid_freight)],
+        ["已付竹款(合作社)", format_money(paid_bamboo)],
+        ["未付竹款(合作社)", format_money(unpaid_bamboo)],
+        ["--- 问题口径 ---", ""],
+        ["异常运单", f"{len(exc_wbs)} 条"],
+        ["缺磅单照片", f"{len(no_photo_wbs)} 条"],
+        ["有未付款", f"{len(unpaid_wbs)} 条"],
+        ["重复运单", f"{len(dup_wbs)} 条"],
+    ]
+
+    click.echo(f"\n{'=' * 60}")
+    click.echo(f"  月结复核总览 - {start_date} ~ {end_date}")
+    click.echo(f"{'=' * 60}")
+    print_table(overview, ["项目", "数值"], "月结总览")
+
+    click.echo("\n📁 正在生成月结复核包 (6个Sheet)...")
+
+    if not export_path:
+        export_path = f"月结复核包_{start_date}_{end_date}.xlsx"
+    if not os.path.isabs(export_path):
+        export_path = os.path.join(store.get_report_dir(), export_path)
+
+    import pandas as pd
+    os.makedirs(os.path.dirname(export_path), exist_ok=True)
+
+    with click.progressbar(length=6, label="导出月结包") as bar:
+        with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+            df_ov = pd.DataFrame([{"项目": k, "数值": v} for k, v in overview],
+                                 columns=["项目", "数值"])
+            df_ov.to_excel(writer, sheet_name="月结总览", index=False)
+            bar.update(1)
+
+            dg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+                "趟数": 0, "总净重(吨)": 0.0, "运费(元)": 0.0,
+                "已付运费(元)": 0.0, "未付运费(元)": 0.0
+            })
+            for w in waybills:
+                key = w.driver_name or "未知司机"
+                plate = w.license_plate or "-"
+                dg[key]["车牌号"] = plate
+                dg[key]["趟数"] += 1
+                dg[key]["总净重(吨)"] += round(w.net_weight, 3)
+                dg[key]["运费(元)"] += round(w.freight, 2)
+                pf = min(w.paid_amount, w.freight) if w.is_paid else 0.0
+                dg[key]["已付运费(元)"] += round(pf, 2)
+
+            dr_rows = []
+            for name, d in sorted(dg.items()):
+                d["未付运费(元)"] = round(d["运费(元)"] - d["已付运费(元)"], 2)
+                dr_rows.append({"司机": name, **{k: (round(v, 3) if "吨" in k else (round(v, 2) if isinstance(v, float) else v))
+                                                 for k, v in d.items()}})
+            pd.DataFrame(dr_rows).to_excel(writer, sheet_name="司机运费汇总", index=False)
+            bar.update(1)
+
+            fg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+                "单数": 0, "总净重(吨)": 0.0, "竹款(元)": 0.0,
+                "已付竹款(元)": 0.0, "未付竹款(元)": 0.0,
+                "涉及收购点": set(), "涉及竹种": set()
+            })
+            for w in waybills:
+                key = w.farmer_name or "未登记竹农"
+                fg[key]["单数"] += 1
+                fg[key]["总净重(吨)"] += round(w.net_weight, 3)
+                fg[key]["竹款(元)"] += round(w.bamboo_value, 2)
+                pb = max(0, w.paid_amount - w.freight) if w.is_paid and w.paid_amount > w.freight else 0.0
+                if not w.is_paid:
+                    pb = 0.0
+                fg[key]["已付竹款(元)"] += round(pb, 2)
+                if w.purchase_point_name:
+                    fg[key]["涉及收购点"].add(w.purchase_point_name)
+                if w.bamboo_type_name:
+                    fg[key]["涉及竹种"].add(w.bamboo_type_name)
+
+            fa_rows = []
+            for name, d in sorted(fg.items(), key=lambda x: -x[1]["竹款(元)"]):
+                d["未付竹款(元)"] = round(d["竹款(元)"] - d["已付竹款(元)"], 2)
+                d["涉及收购点"] = "/".join(sorted(d["涉及收购点"])) or "-"
+                d["涉及竹种"] = "/".join(sorted(d["涉及竹种"])) or "-"
+                fa_rows.append({"竹农": name, **{k: (round(v, 3) if "吨" in k else (round(v, 2) if isinstance(v, float) else v))
+                                                 for k, v in d.items()}})
+            pd.DataFrame(fa_rows).to_excel(writer, sheet_name="竹农竹款汇总", index=False)
+            bar.update(1)
+
+            up_rows = []
+            for w in waybills:
+                pf = min(w.paid_amount, w.freight) if w.is_paid else 0.0
+                pb = max(0, w.paid_amount - w.freight) if w.is_paid and w.paid_amount > w.freight else 0.0
+                uf = round(w.freight - pf, 2)
+                ub = round(w.bamboo_value - pb, 2)
+                if uf > 0 or ub > 0 or not w.is_paid:
+                    up_rows.append({
+                        "运单号": w.waybill_no, "运输日期": w.transport_date,
+                        "车牌号": w.license_plate, "司机": w.driver_name or "-",
+                        "竹农": w.farmer_name or "-",
+                        "净重(吨)": round(w.net_weight, 3),
+                        "运费(元)": round(w.freight, 2),
+                        "竹款(元)": round(w.bamboo_value, 2),
+                        "已付运费": round(pf, 2),
+                        "未付运费": round(uf, 2),
+                        "已付竹款": round(pb, 2),
+                        "未付竹款": round(ub, 2),
+                        "付款备注": w.paid_remark or "-",
+                    })
+            pd.DataFrame(up_rows).to_excel(writer, sheet_name="未付款明细", index=False)
+            bar.update(1)
+
+            exc_rows = []
+            for w in exc_wbs:
+                exc_rows.append({
+                    "运单号": w.waybill_no, "运输日期": w.transport_date,
+                    "车牌号": w.license_plate, "司机": w.driver_name or "-",
+                    "竹农": w.farmer_name or "-",
+                    "净重(吨)": round(w.net_weight, 3),
+                    "异常数": len(w.exceptions),
+                    "异常描述": "; ".join(w.exceptions),
+                    "是否重复": "是" if w.is_duplicate else "否",
+                    "历史运单号": store.find_waybill(w.duplicate_of).waybill_no if w.duplicate_of and store.find_waybill(w.duplicate_of) else "-",
+                    "备注": w.remark or "-",
+                })
+            pd.DataFrame(exc_rows).to_excel(writer, sheet_name="异常待补清单", index=False)
+            bar.update(1)
+
+            np_rows = []
+            for w in no_photo_wbs:
+                np_rows.append({
+                    "运单号": w.waybill_no, "运输日期": w.transport_date,
+                    "车牌号": w.license_plate, "司机": w.driver_name or "-",
+                    "竹农": w.farmer_name or "-",
+                    "净重(吨)": round(w.net_weight, 3),
+                    "磅单号": w.weight_note_no or "-",
+                    "收购点": w.purchase_point_name or "-",
+                    "竹款(元)": round(w.bamboo_value, 2),
+                    "运费(元)": round(w.freight, 2),
+                })
+            pd.DataFrame(np_rows).to_excel(writer, sheet_name="缺磅单照片", index=False)
+            bar.update(1)
+
+    click.echo(f"\n✅ 月结复核包已导出: {export_path}")
+    click.echo(f"   Sheet(6): 月结总览 + 司机运费汇总 + 竹农竹款汇总 + 未付款明细 + 异常待补清单 + 缺磅单照片")
