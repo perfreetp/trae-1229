@@ -10,7 +10,7 @@ from ..models import Waybill, Settlement, Driver
 from ..storage import DataStore
 from ..utils import (
     print_table, format_money, format_weight, is_within_date_range,
-    normalize_date, export_to_excel, generate_serial_no
+    normalize_date, export_to_excel, generate_serial_no, filter_effective_waybills
 )
 
 
@@ -57,7 +57,7 @@ def settle_driver(
     driver_map = {d.id: d for d in drivers}
 
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
 
     if driver_name:
         waybills = [w for w in waybills if driver_name in (w.driver_name or "")]
@@ -272,7 +272,7 @@ def settle_farmer(
     waybills = store.load_waybills()
 
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
     waybills = [w for w in waybills if w.farmer_name or w.bamboo_value > 0]
 
     if farmer_name:
@@ -460,7 +460,8 @@ def settle_pay(
             if w.id in id_list or w.waybill_no in id_list:
                 target_ids.add(w.id)
     if driver_name:
-        for w in waybills:
+        effective_wbs = filter_effective_waybills(waybills)
+        for w in effective_wbs:
             if driver_name in (w.driver_name or ""):
                 if start_date and end_date and not is_within_date_range(w.transport_date, start_date, end_date):
                     continue
@@ -526,7 +527,7 @@ def settle_unpaid(ctx, group_by: str, start_date: str, end_date: str):
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
 
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
     if start_date and end_date:
         waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
 

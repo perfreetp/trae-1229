@@ -10,7 +10,7 @@ from ..models import Waybill
 from ..storage import DataStore
 from ..utils import (
     print_table, format_money, format_weight, is_within_date_range,
-    normalize_date, export_to_excel
+    normalize_date, export_to_excel, filter_effective_waybills
 )
 
 
@@ -51,7 +51,7 @@ def report_summary(ctx, start_date: str, end_date: str, group_by: str, export_pa
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
 
     if not waybills:
         click.echo("\n该日期范围内没有运单数据")
@@ -227,7 +227,7 @@ def report_purchase(ctx, start_date: str, end_date: str, bamboo: str, export_pat
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
     if bamboo:
         waybills = [w for w in waybills if bamboo in (w.bamboo_type_name or "")]
 
@@ -317,7 +317,7 @@ def report_loading(ctx, start_date: str, end_date: str):
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
 
     if not waybills:
         click.echo("\n没有数据")
@@ -365,7 +365,7 @@ def report_bamboo(ctx, start_date: str, end_date: str):
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
 
     if not waybills:
         click.echo("\n没有数据")
@@ -428,7 +428,7 @@ def report_driver(ctx, start_date: str, end_date: str, top: int):
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
 
     if not waybills:
         click.echo("\n没有数据")
@@ -493,6 +493,7 @@ def report_pending(ctx, start_date: str, end_date: str, export_path: str):
     """
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
+    waybills = filter_effective_waybills(waybills)
 
     if start_date and end_date:
         waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
@@ -599,7 +600,7 @@ def report_daily(ctx, report_date: str):
 
     waybills = store.load_waybills()
     waybills = [w for w in waybills if normalize_date(w.transport_date) == report_date]
-    waybills = [w for w in waybills if not w.is_duplicate]
+    waybills = filter_effective_waybills(waybills)
 
     click.echo(f"\n{'=' * 60}")
     click.echo(f"  竹子运输日报表 - {report_date}")

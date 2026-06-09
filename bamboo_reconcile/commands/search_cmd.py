@@ -9,7 +9,7 @@ from ..models import Waybill
 from ..storage import DataStore
 from ..utils import (
     print_table, format_money, format_weight, is_within_date_range,
-    normalize_date
+    normalize_date, filter_effective_waybills, get_waybill_status_label
 )
 
 
@@ -151,16 +151,13 @@ def search_waybill(
         data = []
         for i, w in enumerate(waybills[:limit]):
             status_str = []
+            status_label = get_waybill_status_label(w)
+            if status_label:
+                status_str.append(status_label)
             if w.is_paid:
                 status_str.append("已付")
             if w.exceptions:
                 status_str.append(f"异常{len(w.exceptions)}")
-            if w.is_duplicate:
-                status_str.append("重复")
-            if w.is_merged:
-                status_str.append("合并")
-            if w.is_split:
-                status_str.append("拆分")
 
             data.append([
                 i + 1,
@@ -204,6 +201,7 @@ def search_exception(ctx, start_date: str, end_date: str, exc_type: str, fix: bo
     store: DataStore = ctx.obj["store"]
     waybills = store.load_waybills()
     waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
+    waybills = filter_effective_waybills(waybills)
 
     exc_wbs = [w for w in waybills if w.exceptions]
     if exc_type:
@@ -364,7 +362,7 @@ def search_note(ctx, waybill_id: str, add_note: str, list_notes: bool, clear: bo
     if clear:
         if click.confirm(f"\n确定要清除运单 {target.waybill_no} 的所有人工备注吗？"):
             target.manual_notes = []
-            target.add_note("清除历史备注", operator)
+            target.updated_at = datetime.now().isoformat()
             store.update_waybill(target)
             click.echo(f"\n✅ 已清除备注")
         return
@@ -404,22 +402,24 @@ def search_pending(ctx, pending_type: str, start_date: str, end_date: str):
       bamboo search pending --type exception --start-date 2024-01-01
     """
     store: DataStore = ctx.obj["store"]
-    waybills = store.load_waybills()
+    all_waybills = store.load_waybills()
+    waybills = filter_effective_waybills(all_waybills)
 
     if start_date and end_date:
         waybills = [w for w in waybills if is_within_date_range(w.transport_date, start_date, end_date)]
+        all_waybills = [w for w in all_waybills if is_within_date_range(w.transport_date, start_date, end_date)]
 
     pending = []
     for w in waybills:
         match = False
-        if pending_type == "all" and (not w.is_paid or w.exceptions or w.is_duplicate or not w.weight_note_photo or w.freight <= 0):
+        if pending_type == "all" and (not w.is_paid or w.exceptions or not w.weight_note_photo or (w.net_weight > 0 and w.freight <= 0)):
             match = True
         elif pending_type == "unpaid" and not w.is_paid:
             match = True
         elif pending_type == "exception" and w.exceptions:
             match = True
-        elif pending_type == "duplicate" and w.is_duplicate:
-            match = True
+        elif pending_type == "duplicate":
+            continue
         elif pending_type == "no_photo" and w.weight_note_no and not w.weight_note_photo:
             match = True
         elif pending_type == "no_price" and w.net_weight > 0 and w.freight <= 0:
@@ -427,6 +427,12 @@ def search_pending(ctx, pending_type: str, start_date: str, end_date: str):
 
         if match:
             pending.append(w)
+
+    if pending_type == "duplicate":
+        for w in all_waybills:
+            if w.is_duplicate:
+                pending.append(w)
+        click.echo(f"\n提示：重复运单(is_duplicate)已不参与统计汇总，单独在此处列出供处理。")
 
     if not pending:
         click.echo(f"\n✅ 没有找到待处理事项")
@@ -445,12 +451,13 @@ def search_pending(ctx, pending_type: str, start_date: str, end_date: str):
     data = []
     for idx, w in enumerate(pending[:30], 1):
         tags = []
+        status_label = get_waybill_status_label(w)
+        if status_label:
+            tags.append(status_label)
         if not w.is_paid:
             tags.append("未付款")
         if w.exceptions:
             tags.append(f"异常{len(w.exceptions)}")
-        if w.is_duplicate:
-            tags.append("重复")
         if w.weight_note_no and not w.weight_note_photo:
             tags.append("缺照片")
         if w.net_weight > 0 and w.freight <= 0:
@@ -477,17 +484,24 @@ def search_pending(ctx, pending_type: str, start_date: str, end_date: str):
         click.echo(f"  ... 还有 {len(pending) - 30} 条未显示")
 
     counter = defaultdict(int)
+    status_counter = defaultdict(int)
     for w in pending:
+        status_label = get_waybill_status_label(w)
+        if status_label:
+            status_counter[status_label] += 1
         if not w.is_paid:
             counter["未付款"] += 1
         if w.exceptions:
             counter["有异常"] += 1
-        if w.is_duplicate:
-            counter["重复运单"] += 1
         if w.weight_note_no and not w.weight_note_photo:
             counter["缺磅单照片"] += 1
         if w.net_weight > 0 and w.freight <= 0:
             counter["未计算运费"] += 1
+
+    if status_counter:
+        click.echo(f"\n状态分布:")
+        for k, v in sorted(status_counter.items(), key=lambda x: -x[1]):
+            click.echo(f"  {k}: {v} 条")
 
     click.echo(f"\n分类统计:")
     for k, v in sorted(counter.items(), key=lambda x: -x[1]):

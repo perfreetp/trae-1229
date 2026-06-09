@@ -1,7 +1,7 @@
 """通用工具函数"""
 import re
 import os
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 from datetime import datetime, date
 from collections import defaultdict
 
@@ -324,3 +324,47 @@ def is_within_date_range(date_str: str, start_date: str, end_date: str) -> bool:
     s = normalize_date(start_date)
     e = normalize_date(end_date)
     return s <= d <= e
+
+
+def is_effective_waybill(w: Waybill) -> bool:
+    """判断运单是否为最终有效的运单（用于报表、结算等统计场景）
+
+    有效运单定义：
+      - 不是重复运单 (is_duplicate=False)
+      - 如果是合并后的运单：保留合并产生的新单（is_merged=True 且 merged_ids 非空）
+                           排除被合并掉的原单（is_merged=True 且 merged_ids 为空）
+      - 如果是拆分后的运单：保留拆分产生的子单（is_split=True 且 split_parent_id 非空）
+                           排除被拆分掉的原单（is_split=True 且 split_parent_id 为空）
+      - 其他普通运单：正常保留
+    """
+    if w.is_duplicate:
+        return False
+    if w.is_merged and not w.merged_ids:
+        return False
+    if w.is_split and not w.split_parent_id:
+        return False
+    return True
+
+
+def filter_effective_waybills(waybills: List[Waybill]) -> List[Waybill]:
+    """过滤出最终有效的运单列表"""
+    return [w for w in waybills if is_effective_waybill(w)]
+
+
+def get_waybill_status_label(w: Waybill) -> str:
+    """获取运单的状态标签，用于搜索列表，避免重复显示"""
+    tags = []
+    if w.is_duplicate:
+        tags.append("重复")
+    elif w.is_merged:
+        if w.merged_ids:
+            tags.append("合并结果")
+        else:
+            tags.append("已被合并")
+    elif w.is_split:
+        if w.split_parent_id:
+            tags.append("拆分子单")
+        else:
+            tags.append("已被拆分")
+    return ", ".join(tags)
+

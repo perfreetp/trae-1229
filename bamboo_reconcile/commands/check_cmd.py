@@ -10,7 +10,7 @@ from ..utils import (
     validate_license_plate, validate_driver_name, validate_phone,
     validate_weight, normalize_license_plate, normalize_date,
     find_duplicate_waybills, find_missing_loading_points, find_weight_mismatch,
-    print_table, is_within_date_range
+    print_table, is_within_date_range, filter_effective_waybills
 )
 
 
@@ -58,6 +58,9 @@ def cmd_check(
     elif end_date:
         waybills = [w for w in waybills if normalize_date(w.transport_date) <= normalize_date(end_date)]
         click.echo(f"\n截至 {end_date}, 共 {len(waybills)} 条运单")
+
+    waybills = filter_effective_waybills(waybills)
+    click.echo(f"有效运单筛选后: 剩余 {len(waybills)} 条 (已排除重复/已合并原单/已拆分原单)")
 
     if not waybills:
         click.echo("\n没有可检查的运单数据")
