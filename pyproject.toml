@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bamboo-reconcile"
+version = "1.0.0"
+description = "彭州竹子运输对账助手 - 合作社财务和车队调度批量核对运单工具"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "彭州竹子合作社" }]
+license = { text = "MIT" }
+dependencies = [
+    "click>=8.1.0",
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "python-dateutil>=2.8.0",
+    "tabulate>=0.9.0",
+]
+
+[project.scripts]
+bamboo = "bamboo_reconcile.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bamboo_reconcile*"]
